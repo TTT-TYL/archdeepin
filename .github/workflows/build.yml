@@ -1,0 +1,62 @@
+name: Build Arch Deepin ISO
+
+on:
+  workflow_dispatch: # 允许手动点击运行
+  # schedule:
+  #   - cron: '0 2 * * 0' # 可选：每周构建一次
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:base-devel
+      options: --privileged # 必须特权模式以支持 loop 设备挂载
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Environment
+        run: |
+          # 安装基础依赖
+          pacman -Sy --noconfirm archiso git sudo
+          
+          # 创建构建用户 (mkarchiso 不推荐直接用 root)
+          useradd -m -G wheel builder
+          echo '%builder ALL=(ALL) NOPASSWD: ALL' >> /etc/sudoers
+
+      - name: Prepare Archiso
+        run: |
+          su - builder -c "
+          # 1. 复制官方配置模板
+          cp -r /usr/share/archiso/configs/releng/* ~/archiso/
+          
+          # 2. 覆盖自定义配置
+          cp /github/workspace/config/packages.x86_64 ~/archiso/
+          cp /github/workspace/config/pacman.conf ~/archiso/pacman.conf
+          
+          # 3. 复制启动脚本
+          mkdir -p ~/archiso/airootfs/root
+          cp /github/workspace/scripts/post-install.sh ~/archiso/airootfs/root/
+          chmod +x ~/archiso/airootfs/root/post-install.sh
+          "
+
+      - name: Build ISO
+        run: |
+          su - builder -c "
+          cd ~/archiso
+          
+          # 赋予构建脚本执行权限
+          chmod +x build.sh
+          
+          # 执行构建
+          # -v: 详细输出
+          ./build.sh -v
+          "
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Arch-Deepin-ISO
+          path: /home/builder/archiso/out/*.iso
+          retention-days: 1 # 产物保留1天，防止占用过多空间

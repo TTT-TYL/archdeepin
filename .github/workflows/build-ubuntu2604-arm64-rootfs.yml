@@ -99,7 +99,7 @@ jobs:
           sudo rm -f ${ROOTFS_DIR}/usr/bin/qemu-aarch64-static
 
           # 打包最终压缩包
-          tar -zcpf ubuntu2604-resolute-arm64-docker-rootfs.tar.gz -C ${ROOTFS_DIR} .
+          sudo tar -zcpf ubuntu2604-resolute-arm64-docker-rootfs.tar.gz -C ${ROOTFS_DIR} .
 
       - name: Upload build artifact to Actions
         uses: actions/upload-artifact@v4

@@ -46,18 +46,17 @@ jobs:
 
           # 替换ARM架构APT源
           sudo tee ${ROOTFS_DIR}/etc/apt/sources.list <<EOF
-deb ${MIRROR} ${CODENAME} main restricted universe multiverse
-deb ${MIRROR} ${CODENAME}-updates main restricted universe multiverse
-deb ${MIRROR} ${CODENAME}-backports main restricted universe multiverse
-deb http://ports.ubuntu.com/ ${CODENAME}-security main restricted universe multiverse
-EOF
+          deb ${MIRROR} ${CODENAME} main restricted universe multiverse
+          deb ${MIRROR} ${CODENAME}-updates main restricted universe multiverse
+          deb ${MIRROR} ${CODENAME}-backports main restricted universe multiverse
+          deb http://ports.ubuntu.com/ ${CODENAME}-security main restricted universe multiverse
+          EOF
 
           # 主机名、hosts、DNS配置
           echo "ubuntu2604-resolute-arm64" | sudo tee ${ROOTFS_DIR}/etc/hostname
           sudo tee ${ROOTFS_DIR}/etc/hosts <<EOF
-127.0.0.1   localhost ubuntu2604-resolute-arm64
-::1         ip6-localhost ip6-loopback
-EOF
+          127.0.0.1   localhost ubuntu2604-resolute-arm64::1         ip6-localhost ip6-loopback
+          EOF
           echo "nameserver 223.5.5.5" | sudo tee ${ROOTFS_DIR}/etc/resolv.conf
           echo "nameserver 114.114.114.114" | sudo tee -a ${ROOTFS_DIR}/etc/resolv.conf
 
@@ -94,7 +93,7 @@ EOF
           apt autoclean
           apt clean
           rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
-INNER
+          INNER
 
           # 删除qemu-static，成品rootfs不需要
           sudo rm -f ${ROOTFS_DIR}/usr/bin/qemu-aarch64-static

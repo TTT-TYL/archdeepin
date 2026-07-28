@@ -1,181 +1,166 @@
-name: Build Ubuntu 26.04 Resolute ARM64 Localized RootFS
-run-name: Build Ubuntu 26.04 resolute arm64 rootfs @ ${{ github.sha }}
+name: Build Ubuntu 26.04 Resolute ARM64 RootFS
+run-name: Build Ubuntu 26.04 resolute arm64 localized rootfs full tools + OpenClaw + SSH
 
+# 触发规则
 on:
   push:
     branches: [main, master]
-  workflow_dispatch:  # 允许页面手动触发构建
+  workflow_dispatch: # 手动触发按钮
+
+env:
+  DISTRO_CODENAME: resolute
+  TARGET_ARCH: arm64
+  ROOTFS_PATH: ./ubuntu-26.04-resolute-arm64-rootfs
+  TARBALL_NAME: ubuntu-26.04-resolute-arm64-full-rootfs.tar.xz
+  TIME_ZONE: Asia/Shanghai
 
 jobs:
   build_rootfs:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
     steps:
-      - name: Checkout empty workspace
+      - name: 检出代码仓库
         uses: actions/checkout@v4
 
-      - name: Install cross-build & qemu emulation dependencies
+      - name: 安装构建依赖 & QEMU ARM64 跨架构模拟
         run: |
-          sudo apt update
-          sudo apt install -y \
-            debootstrap qemu-user-static binfmt-support \
-            dpkg-cross tar xz-utils rsync coreutils  \
-            ca-certificates gnupg2
-
-          # 注册aarch64 binfmt，使chroot可执行ARM64二进制
+          sudo apt update -qq
+          sudo apt install -y -qq debootstrap qemu-user-static binfmt-support \
+            coreutils tar xz locales curl wget ca-certificates mountpoint
+          # 启用arm64二进制自动解释执行
           sudo update-binfmts --enable qemu-aarch64
-          sudo systemctl restart binfmt-support
+          # 验证qemu模拟生效
+          qemu-aarch64-static --version
 
-      - name: Set global environment variables
-        id: env_vars
-        run: |
-          echo "DIST_CODENAME=resolute" >> $GITHUB_ENV
-          echo "TARGET_ARCH=arm64" >> $GITHUB_ENV
-          echo "ROOTFS_PATH=./ubuntu2604-resolute-arm64-rootfs" >> $GITHUB_ENV
-          echo "TIMEZONE=Asia/Shanghai" >> $GITHUB_ENV
-          echo "ROOT_PASSWORD=Root@123456" >> $GITHUB_ENV
-
-      - name: Bootstrap base Ubuntu 26.04 arm64 rootfs (Huawei Cloud source)
+      - name: 第一阶段 debootstrap 拉取ARM64基础rootfs（官方构建源）
         run: |
           sudo rm -rf ${{ env.ROOTFS_PATH }}
           sudo mkdir -p ${{ env.ROOTFS_PATH }}
-
+          # --foreign 跨架构初阶引导，源为Ubuntu官方归档源
           sudo debootstrap \
             --arch=${{ env.TARGET_ARCH }} \
-            --include=locales,apt-transport-https,ca-certificates,gnupg,systemd,sudo \
-            ${{ env.DIST_CODENAME }} \
+            --foreign \
+            ${{ env.DISTRO_CODENAME }} \
             ${{ env.ROOTFS_PATH }} \
-            https://mirrors.huaweicloud.com/ubuntu-ports/
+            http://archive.ubuntu.com/ubuntu/
+          # 注入静态qemu二进制，用于chroot内执行arm64程序
+          sudo cp /usr/bin/qemu-aarch64-static ${{ env.ROOTFS_PATH }}/usr/bin/
 
-      - name: Mount virtual fs & inject qemu-aarch64-static
+      - name: 第二阶段 chroot 完成系统引导安装
         run: |
-          # 绑定挂载必要文件系统供chroot使用
+          sudo chroot ${{ env.ROOTFS_PATH }} /bin/bash -c "/debootstrap/debootstrap --second-stage"
+
+      - name: 挂载chroot所需虚拟文件系统
+        run: |
           sudo mount --bind /dev     ${{ env.ROOTFS_PATH }}/dev
           sudo mount --bind /dev/pts ${{ env.ROOTFS_PATH }}/dev/pts
           sudo mount --bind /proc    ${{ env.ROOTFS_PATH }}/proc
           sudo mount --bind /sys     ${{ env.ROOTFS_PATH }}/sys
 
-          # 拷贝静态qemu解释器到rootfs内，ARM64程序才能运行
-          sudo cp /usr/bin/qemu-aarch64-static ${{ env.ROOTFS_PATH }}/usr/bin/
-
-      - name: Chroot internal full system configuration
+      - name: Chroot内部完整配置（源替换、中文、工具、SSH、OpenClaw）
         run: |
-          sudo chroot ${{ env.ROOTFS_PATH }} /bin/bash <<'INNER_EOF'
+          sudo chroot ${{ env.ROOTFS_PATH }} /bin/bash <<'CHROOT_EOF'
           set -euo pipefail
-          export CODENAME=resolute
-          export TZ=Asia/Shanghai
+          CODENAME=resolute
 
-          ###########################################################################
-          # 1. 替换华为云ARM64 Ubuntu软件源 sources.list
-          ###########################################################################
-          cat > /etc/apt/sources.list <<SOURCES
-          deb https://mirrors.huaweicloud.com/ubuntu-ports/ ${CODENAME} main restricted universe multiverse
-          deb https://mirrors.huaweicloud.com/ubuntu-ports/ ${CODENAME}-security main restricted universe multiverse
-          deb https://mirrors.huaweicloud.com/ubuntu-ports/ ${CODENAME}-updates main restricted universe multiverse
-          deb https://mirrors.huaweicloud.com/ubuntu-ports/ ${CODENAME}-backports main restricted universe multiverse
-          SOURCES
+          ######################################################################
+          # 1. 替换系统APT源为华为云Ubuntu镜像源
+          ######################################################################
+          cat > /etc/apt/sources.list <<LIST
+          deb https://mirrors.huaweicloud.com/ubuntu/ ${CODENAME} main restricted universe multiverse
+          deb https://mirrors.huaweicloud.com/ubuntu/ ${CODENAME}-security main restricted universe multiverse
+          deb https://mirrors.huaweicloud.com/ubuntu/ ${CODENAME}-updates main restricted universe multiverse
+          deb https://mirrors.huaweicloud.com/ubuntu/ ${CODENAME}-backports main restricted universe multiverse
+          LIST
 
-          apt clean
-          apt update
-          apt full-upgrade -y
+          # 更新源并全量升级系统
+          apt update -qq
+          apt full-upgrade -y -qq
 
-          ###########################################################################
-          # 2. 完整中文本地化环境
-          ###########################################################################
-          # 生成中文UTF-8 locale
+          ######################################################################
+          # 2. 完整中文本地化 + 时区设置
+          ######################################################################
+          # 生成中文UTF-8区域语言
           locale-gen zh_CN.UTF-8
-          update-locale LANG=zh_CN.UTF-8 LC_ALL=zh_CN.UTF-8 LANGUAGE=zh_CN:zh
-
-          # 写入默认locale配置
+          update-locale LANG=zh_CN.UTF-8 LC_ALL=zh_CN.UTF-8 LC_MESSAGES=zh_CN.UTF-8
           echo 'LANG=zh_CN.UTF-8' > /etc/default/locale
+          echo 'LC_ALL=zh_CN.UTF-8' >> /etc/default/locale
 
-          # 设置上海时区
-          ln -sf /usr/share/zoneinfo/${TZ} /etc/localtime
-          echo "${TZ}" > /etc/timezone
-          dpkg-reconfigure -f noninteractive tzdata
+          # 设置时区上海
+          timedatectl set-timezone Asia/Shanghai
 
-          # 安装全套中文语言包+中文字体
-          apt install -y \
+          # 全套中文语言包、字体、中文手册
+          apt install -y -qq \
             language-pack-zh-hans language-pack-zh-hans-base \
-            fonts-wqy-zenhei fonts-wqy-microhei fonts-noto-cjk fonts-noto-sans-cjk
+            fonts-wqy-zenhei fonts-noto-cjk fonts-noto-cjk-extra \
+            manpages-zh ttf-mscorefonts-installer
 
-          ###########################################################################
-          # 3. 批量安装最全常用工具包（运维、网络、编译、调试、存储、性能）
-          ###########################################################################
-          apt install -y \
-            # 基础命令行编辑器
-            vim nano neovim tmux screen less more tree bat fd-find fzf \
+          ######################################################################
+          # 3. 最全常用工具大包（编译、网络、运维、磁盘、版本控制、调试）
+          ######################################################################
+          apt install -y -qq \
+            # 基础编译环境
+            build-essential gcc g++ make cmake pkg-config libssl-dev libc6-dev git git-lfs \
             # 网络工具全家桶
-            openssh-server curl wget git iproute2 net-tools ifupdown dnsutils \
-            traceroute mtr tcpdump nmap socat ipset iptables arpwatch whois dig \
-            rsync openssl libssl-dev openssl-dev \
+            openssh-server net-tools iproute2 iputils-ping dnsutils traceroute mtr iftop nload \
+            tcpdump socat ncftp rsync wget curl axel aria2 nmap ipset iptables wireguard-tools \
+            # 磁盘与文件系统工具
+            fdisk parted lsblk blkid e2fsprogs dosfstools ntfs-3g mountall squashfs-tools \
+            # 系统监控与运维
+            htop atop iotop bmon tree vim nano less cron logrotate lsof psmisc screen tmux \
             # 压缩解压
-            zip unzip bzip2 gzip xz-utils p7zip-full tar pigz \
-            # 系统监控性能工具
-            htop iotop iftop atop sysstat lsof strace ltrace procps psmisc \
-            # 磁盘文件系统工具
-            parted fdisk lsblk blkid e2fsprogs dosfstools ntfs-3g \
-            # 编译开发基础套件
-            build-essential gcc g++ make cmake pkg-config git-core libtool autoconf automake \
-            libopencl-dev clinfo ocl-icd-opencl-dev \
+            zip unzip rar unrar p7zip-full gzip bzip2 xz-utils zstd pigz \
             # 其他实用工具
-            jq bc calculator cron logrotate man-db sudo passwd adduser dbus
+            sudo ca-certificates software-properties-common apt-transport-https gnupg2 \
+            jq yq bc dos2unix uuid-runtime sysstat dmidecode hdparm
 
-          ###########################################################################
-          # 4. OpenSSH Server 安全配置与开机自启
-          ###########################################################################
-          # 允许root登录 + 密码登录（生产环境可改为PasswordAuthentication no）
-          sed -i 's/^#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config
-          sed -i 's/^#PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config
+          ######################################################################
+          # 4. OpenSSH 安全配置、开机自启、root登录（测试环境）
+          ######################################################################
+          systemctl enable --now ssh
+          # 允许root密码登录，生产环境请注释这两行改用密钥登录
+          sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config
+          sed -i 's/#PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config
+          # 重载sshd配置
+          systemctl reload sshd
+          # 设置root默认密码 root（务必在部署后修改）
+          echo "root:root" | chpasswd
 
-          # 允许密码过期可登录、启用端口22
-          sed -i 's/^#PermitEmptyPasswords no/PermitEmptyPasswords no/' /etc/ssh/sshd_config
-
-          # 设置root密码
-          echo "root:Root@123456" | chpasswd
-
-          # systemd 开机自启ssh服务
-          systemctl enable ssh.service
-          systemctl daemon-reload
-
-          ###########################################################################
+          ######################################################################
           # 5. 官方脚本安装 OpenClaw
-          ###########################################################################
+          ######################################################################
           curl -fsSL https://openclaw.ai/install.sh | bash
 
-          ###########################################################################
-          # 6. 镜像瘦身清理，减小体积
-          ###########################################################################
-          apt autoremove -y
+          ######################################################################
+          # 6. 清理冗余减小镜像体积
+          ######################################################################
+          apt autoremove -y -qq
           apt autoclean
           apt clean
-          rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* /root/.bash_history
-          rm -rf /var/log/* /var/cache/*
-          history -c
-          INNER_EOF
+          rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* /root/.cache/*
+          CHROOT_EOF
 
-      - name: Safely unmount chroot bind mounts（必须always执行防止挂载残留）
+      - name: 强制卸载chroot绑定挂载（防止文件系统损坏）
         if: always()
         run: |
-          set +e
-          sudo umount --lazy ${{ env.ROOTFS_PATH }}/sys
-          sudo umount --lazy ${{ env.ROOTFS_PATH }}/proc
-          sudo umount --lazy ${{ env.ROOTFS_PATH }}/dev/pts
-          sudo umount --lazy ${{ env.ROOTFS_PATH }}/dev
-          echo "All virtual filesystems unmounted successfully"
+          sudo umount -lf ${{ env.ROOTFS_PATH }}/sys     || true
+          sudo umount -lf ${{ env.ROOTFS_PATH }}/proc    || true
+          sudo umount -lf ${{ env.ROOTFS_PATH }}/dev/pts || true
+          sudo umount -lf ${{ env.ROOTFS_PATH }}/dev     || true
 
-      - name: Compress rootfs to tar.xz high compression
+      - name: 打包RootFS为高压缩tar.xz
         run: |
-          OUTPUT_NAME="ubuntu26.04-resolute-arm64-full-localized-rootfs.tar.xz"
-          tar -cJvf ${OUTPUT_NAME} -C ${{ env.ROOTFS_PATH }} .
-          ls -lh ${OUTPUT_NAME}
+          cd ${{ env.ROOTFS_PATH }}
+          sudo tar -cJf ../${{ env.TARBALL_NAME }} .
+          ls -lh ../${{ env.TARBALL_NAME }}
 
-      - name: Upload build artifact to GitHub
+      - name: 上传构建产物到Action制品
         uses: actions/upload-artifact@v4
         with:
-          name: ubuntu2604-resolute-arm64-rootfs-package
-          path: ubuntu26.04-resolute-arm64-full-localized-rootfs.tar.xz
+          name: Ubuntu26.04-resolute-arm64-full-rootfs
+          path: ${{ env.TARBALL_NAME }}
           retention-days: 90
+
+
 
 
 

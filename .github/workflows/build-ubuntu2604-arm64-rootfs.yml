@@ -19,7 +19,7 @@ jobs:
           sudo apt update
           sudo apt install -y \
             debootstrap qemu-user-static binfmt-support \
-            dpkg-cross tar xz-utils rsync coreutils mountall \
+            dpkg-cross tar xz-utils rsync coreutils  \
             ca-certificates gnupg2
 
           # 注册aarch64 binfmt，使chroot可执行ARM64二进制

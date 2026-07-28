@@ -1,3 +1,4 @@
+
 name: Build Ubuntu 26.04 Resolute amd64 RootFS (Fix su auth failure)
 
 on:
@@ -48,7 +49,7 @@ jobs:
           # 基础主机名、hosts、DNS
           echo "ubuntu2604-amd64-huawei" | sudo tee ${ROOTFS_DIR}/etc/hostname
           sudo tee ${ROOTFS_DIR}/etc/hosts <<EOF
-          127.0.0.1   localhost ubuntu2604-amd64-huawei  ::1         ip6-localhost ip6-loopback
+          127.0.0.1   localhost ubuntu2604-amd64-huawei::1         ip6-localhost ip6-loopback
           EOF
           echo "nameserver 223.5.5.5" | sudo tee ${ROOTFS_DIR}/etc/resolv.conf
           echo "nameserver 114.114.114.114" | sudo tee -a ${ROOTFS_DIR}/etc/resolv.conf
@@ -63,7 +64,7 @@ jobs:
           set -e
           apt update
 
-          # 安装基础工具、编译环境、SSH、PAM核心包（强制带上pam避免缺失）
+          # 已删除不存在的 shadow 包，保留必要PAM组件
           apt install -y --no-install-recommends \
           apt-transport-https ca-certificates gnupg2 openssl sudo \
           curl wget git vim nano tree htop ncdu iftop iotop \
@@ -71,7 +72,7 @@ jobs:
           zip unzip tar xz-utils bzip2 lz4 zstd \
           build-essential make gcc g++ cmake pkg-config gdb \
           openssh-server cron logrotate tzdata locales systemd \
-          libpam-modules libpam-runtime passwd shadow
+          libpam-modules libpam-runtime passwd
 
           # 时区 + 完整中文本地化
           ln -sf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime
@@ -79,43 +80,42 @@ jobs:
           locale-gen zh_CN.UTF-8
           update-locale LANG=zh_CN.UTF-8 LC_ALL=zh_CN.UTF-8
 
-          # ========== 【关键修复1】可靠设置root密码，替代chpasswd ==========
+          # 可靠设置root密码并解锁账号
           passwd --stdin root <<PWD_EOF
           ${ROOT_PWD}
           ${ROOT_PWD}
           PWD_EOF
-          # 强制解锁root账户，避免账号锁定导致认证失败
           passwd -u root
 
-          # ========== 【关键修复2】修复su SUID权限，解压不会丢失 ==========
+          # 固化su SUID权限，解压不丢失
           chmod u+s /bin/su
 
-          # ========== 【关键修复3】修复passwd/shadow权限与文件锁定属性 ==========
+          # 修复passwd/shadow权限与锁定属性
           chmod 644 /etc/passwd
           chmod 600 /etc/shadow
           chattr -ia /etc/passwd /etc/shadow
 
-          # ========== 【关键修复4】放开PAM su wheel组限制 ==========
+          # 注释PAM wheel限制，允许su切换root
           sed -i 's/^auth.*pam_wheel.so/#&/' /etc/pam.d/su
 
-          # SSH配置：允许root密码登录并开机自启
+          # SSH放行root密码登录
           sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config
           sed -i 's/#PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config
           systemctl enable ssh
 
-          # 系统瘦身清理
+          # 清理瘦身
           apt autoremove -y
           apt autoclean
           apt clean
           rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* /root/.bash_history
           INNER_SCRIPT
 
-          # 安全卸载挂载点
+          # 卸载挂载点
           sudo umount ${ROOTFS_DIR}/sys
           sudo umount ${ROOTFS_DIR}/proc
           sudo umount ${ROOTFS_DIR}/dev
 
-          # 打包输出到 GitHub 工作目录，确保上传插件能找到文件
+          # 打包到工作目录，确保artifact能抓到
           cd "${ROOTFS_DIR}"
           sudo tar -zcpf "${GITHUB_WORKSPACE}/${OUTPUT_TAR}" .
           ls -lh "${GITHUB_WORKSPACE}/${OUTPUT_TAR}"

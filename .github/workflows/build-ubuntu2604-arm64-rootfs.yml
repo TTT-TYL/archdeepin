@@ -1,5 +1,5 @@
-name: Debootstrap + Snap LXD Ubuntu26.04 resolute arm64 RootFS
-run-name: debootstrap base → LXD systemd configure rootfs with OpenClaw & Chinese
+name: Debootstrap + Snap LXD Build Ubuntu26.04 resolute ARM64 RootFS
+run-name: debootstrap base rootfs -> LXD systemd full config
 
 on:
   push:
@@ -21,20 +21,20 @@ jobs:
       - name: Checkout workspace
         uses: actions/checkout@v4
 
-      - name: Install dependencies & Snap LXD
+      - name: Install build dependencies & Snap LXD
         run: |
           sudo apt update -qq
           sudo apt install -y -qq \
             debootstrap qemu-user-static binfmt-support xz-utils util-linux \
-            curl wget ca-certificates tar coreutils jq
+            curl wget ca-certificates tar coreutils
 
-          # Snap安装LXD
+          # Snap 安装官方 LXD
           sudo snap install lxd
           sudo usermod -aG lxd $USER
-          # 安全初始化，不触碰内置静态ubuntu remote
+          # 初始化，不操作静态内置 remote
           sg lxd -c "lxd init --auto"
 
-      # 步骤1：debootstrap 官方源构建arm64基础rootfs
+      # 1. debootstrap 官方源构建 arm64 基础 rootfs
       - name: Debootstrap official Ubuntu archive rootfs
         run: |
           sudo rm -rf ${{ env.DEBOOT_ROOTFS }}
@@ -46,48 +46,49 @@ jobs:
             ${{ env.DEBOOT_ROOTFS }} \
             http://archive.ubuntu.com/ubuntu/
 
-          # 注入qemu静态二进制完成二阶引导
+          # 注入 qemu-aarch64-static 完成二阶引导
           sudo cp /usr/bin/qemu-aarch64-static ${{ env.DEBOOT_ROOTFS }}/usr/bin/
           sudo chroot ${{ env.DEBOOT_ROOTFS }} /bin/bash -c "/debootstrap/debootstrap --second-stage"
 
-      # 步骤2：打包rootfs + 生成【完整合规LXD metadata.yaml】（修复Missing creation date）
-      - name: Build valid LXD import bundle
+      # 2. 打包 + 生成 LXD 严格合规 metadata.yaml（修复时间戳类型错误）
+      - name: Create valid LXD import bundle
         run: |
-          # 打包纯rootfs
+          # 打包根文件系统
           cd ${{ env.DEBOOT_ROOTFS }}
           sudo tar -cf ../raw-rootfs.tar .
           cd ..
 
-          # 生成符合LXD规范的元数据，补全creation_date等必填字段
+          # 关键：creation_date 使用 Unix 时间戳整数
+          TS=$(date +%s)
           cat > metadata.yaml <<EOF
           architecture: aarch64
           os: ubuntu
           release: resolute
           variant: default
-          creation_date: $(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          creation_date: $TS
           EOF
-
-          # 打包LXD导入包
+ 
+          # 打包 LXD 导入包
           tar -cf lxd-import-bundle.tar metadata.yaml raw-rootfs.tar
           ls -l lxd-import-bundle.tar
 
-      # 步骤3：LXD导入镜像并启动容器
-      - name: Import image & launch LXD container
+      # 3. LXD 导入镜像并启动容器
+      - name: Import custom image & launch container
         run: |
           sg lxd -c "lxc image import lxd-import-bundle.tar --alias ${{ env.LXD_IMG_ALIAS }}"
           sg lxd -c "lxc launch ${{ env.LXD_IMG_ALIAS }} ${{ env.LXD_CT }}"
-          # ARM64 QEMU模拟启动极慢，超长等待systemd就绪
+          # QEMU 模拟 ARM64 启动极慢，长时间等待 systemd 就绪
           sleep 150
           sg lxd -c "lxc info ${{ env.LXD_CT }}"
 
-      # 步骤4：容器内全套系统配置（华为源、中文、工具、SSH、OpenClaw）
-      - name: Configure inside LXD container (full systemd)
+      # 4. 容器内全套配置：华为源、中文、工具、SSH、OpenClaw
+      - name: Full system configuration inside LXD
         run: |
           sg lxd -c "lxc exec ${{ env.LXD_CT }} -- bash <<'CONFIG_EOF'
           set -euo pipefail
           CODENAME=resolute
 
-          # 替换为华为云Ubuntu镜像源
+          # 替换 APT 源为华为云
           cat > /etc/apt/sources.list <<LIST
           deb https://mirrors.huaweicloud.com/ubuntu/ ${CODENAME} main restricted universe multiverse
           deb https://mirrors.huaweicloud.com/ubuntu/ ${CODENAME}-security main restricted universe multiverse
@@ -105,13 +106,13 @@ jobs:
           echo 'LC_ALL=zh_CN.UTF-8' >> /etc/default/locale
           timedatectl set-timezone Asia/Shanghai
 
-          # 中文语言包+字体
+          # 中文语言包、中文字体、中文手册
           apt install -y -qq \
             language-pack-zh-hans language-pack-zh-hans-base \
             fonts-wqy-zenhei fonts-noto-cjk fonts-noto-cjk-extra \
             manpages-zh ttf-mscorefonts-installer
 
-          # 海量开发/运维/网络/磁盘/监控工具集
+          # 最全开发/运维/网络/磁盘/监控工具合集
           apt install -y -qq \
             build-essential gcc g++ make cmake pkg-config libssl-dev libc6-dev git git-lfs \
             openssh-server net-tools iproute2 iputils-ping dnsutils traceroute mtr iftop nload \
@@ -122,47 +123,46 @@ jobs:
             sudo ca-certificates software-properties-common apt-transport-https gnupg2 \
             jq yq bc dos2unix uuid-runtime sysstat dmidecode hdparm util-linux
 
-          # SSH systemd托管开机自启，root密码登录（仅测试）
+          # OpenSSH 配置、开机自启、root密码登录（仅测试环境）
           systemctl enable --now ssh
           sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config
           sed -i 's/#PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config
           systemctl reload sshd
           echo \"root:root\" | chpasswd
 
-          # OpenClaw 指定官方脚本安装
+          # OpenClaw 官方一键脚本安装
           curl -fsSL https://openclaw.ai/install.sh | bash
 
-          # 清理缓存压缩体积
+          # 清理缓存减小体积
           apt autoremove -y -qq
           apt autoclean
           apt clean
           rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* /root/.cache/*
 
-          # 屏蔽apt CLI不稳定警告
+          # 屏蔽 apt 警告
           echo 'APT::Get::Quiet::Warning \"false\";' > /etc/apt/apt.conf.d/99quiet
           CONFIG_EOF"
 
-      # 步骤5：停止容器，导出纯文件系统rootfs
-      - name: Stop container & export final rootfs
+      # 5. 停止容器，导出纯 rootfs
+      - name: Stop container & export final rootfs tar.xz
         run: |
           sg lxd -c "lxc stop ${{ env.LXD_CT }}"
           sleep 20
           sg lxd -c "lxc export ${{ env.LXD_CT }} ./${{ env.OUTPUT_TAR }} --rootfs-only"
           ls -lh ./${{ env.OUTPUT_TAR }}
 
-      # 步骤6：无论成败强制清理容器、镜像、临时文件
-      - name: Cleanup all resources
+      # 6. 强制清理所有资源，避免残留
+      - name: Cleanup LXD container/image and temp files
         if: always()
         run: |
           sg lxd -c "lxc delete -f ${{ env.LXD_CT }} || true"
           sg lxd -c "lxc image delete ${{ env.LXD_IMG_ALIAS }} || true"
           sudo rm -rf ${{ env.DEBOOT_ROOTFS }} raw-rootfs.tar lxd-import-bundle.tar metadata.yaml || true
 
-      # 步骤7：上传最终rootfs压缩包
-      - name: Upload artifact
+      # 7. 上传最终产物
+      - name: Upload rootfs artifact
         uses: actions/upload-artifact@v4
         with:
           name: Ubuntu26.04-resolute-arm64-debootstrap-lxd-rootfs
           path: ${{ env.OUTPUT_TAR }}
           retention-days: 90
-

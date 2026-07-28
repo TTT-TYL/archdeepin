@@ -25,7 +25,7 @@ jobs:
         run: |
           sudo apt update -qq
           sudo apt install -y -qq debootstrap qemu-user-static binfmt-support \
-            coreutils tar xz locales curl wget ca-certificates mountpoint
+            coreutils tar xz-utils locales curl wget ca-certificates 
           # 启用arm64二进制自动解释执行
           sudo update-binfmts --enable qemu-aarch64
           # 验证qemu模拟生效

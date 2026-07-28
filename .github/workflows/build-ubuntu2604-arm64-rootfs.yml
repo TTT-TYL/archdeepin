@@ -3,7 +3,7 @@ name: Build Ubuntu 26.04 Resolute amd64 Custom RootFS (Huawei Cloud Source)
 on:
   push:
     branches: [ main, master ]
-  workflow_dispatch: # 支持网页手动触发构建
+  workflow_dispatch:
 
 jobs:
   build-rootfs:
@@ -19,20 +19,17 @@ jobs:
 
       - name: Build & Customize RootFS with Huawei Cloud APT source
         run: |
-          # 全局变量定义
           export CODENAME="resolute"
           export ARCH="amd64"
           export ROOTFS_DIR="$HOME/ubuntu2604-resolute-amd64-rootfs"
           export OUTPUT_TAR="ubuntu2604-resolute-amd64-huawei-source.tar.gz"
-          # 华为云Ubuntu官方源
           export HUAWEI_MIRROR="https://mirrors.huaweicloud.com/ubuntu"
           export ROOT_PWD="123456"
 
-          # 清理旧目录
           rm -rf "${ROOTFS_DIR}"
           mkdir -p "${ROOTFS_DIR}"
 
-          # 1. debootstrap 拉取最小化Ubuntu 26.04 amd64
+          # 拉取rootfs
           sudo debootstrap \
             --variant=minbase \
             --arch=${ARCH} \
@@ -40,7 +37,7 @@ jobs:
             ${ROOTFS_DIR} \
             ${HUAWEI_MIRROR}
 
-          # 2. 写入【华为云APT软件源】核心修改
+          # 华为云源写入
           sudo tee ${ROOTFS_DIR}/etc/apt/sources.list <<EOF
           deb ${HUAWEI_MIRROR} ${CODENAME} main restricted universe multiverse
           deb ${HUAWEI_MIRROR} ${CODENAME}-updates main restricted universe multiverse
@@ -48,7 +45,7 @@ jobs:
           deb ${HUAWEI_MIRROR} ${CODENAME}-security main restricted universe multiverse
           EOF
 
-          # 3. 基础系统配置：主机名、hosts、DNS
+          # 基础网络配置
           echo "ubuntu2604-amd64-huawei" | sudo tee ${ROOTFS_DIR}/etc/hostname
           sudo tee ${ROOTFS_DIR}/etc/hosts <<EOF
           127.0.0.1   localhost ubuntu2604-amd64-huawei::1         ip6-localhost ip6-loopback
@@ -56,17 +53,16 @@ jobs:
           echo "nameserver 223.5.5.5" | sudo tee ${ROOTFS_DIR}/etc/resolv.conf
           echo "nameserver 114.114.114.114" | sudo tee -a ${ROOTFS_DIR}/etc/resolv.conf
 
-          # 4. 挂载内核文件系统，进入真实chroot定制系统
+          # 挂载虚拟文件系统
           sudo mount --bind /dev ${ROOTFS_DIR}/dev
           sudo mount --bind /proc ${ROOTFS_DIR}/proc
           sudo mount --bind /sys ${ROOTFS_DIR}/sys
 
-          # ===================== chroot内部执行脚本 =====================
+          # chroot内部配置
           sudo chroot ${ROOTFS_DIR} /bin/bash <<INNER_SCRIPT
           set -e
           apt update
 
-          # 一、批量安装常用工具、编译环境、服务组件
           apt install -y --no-install-recommends \
           apt-transport-https ca-certificates gnupg2 openssl sudo \
           curl wget git vim nano tree htop ncdu iftop iotop \
@@ -75,37 +71,36 @@ jobs:
           build-essential make gcc g++ cmake pkg-config gdb \
           openssh-server cron logrotate tzdata locales systemd
 
-          # 二、时区 + 完整中文本地化
+          # 时区中文
           ln -sf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime
           echo "Asia/Shanghai" > /etc/timezone
           locale-gen zh_CN.UTF-8
           update-locale LANG=zh_CN.UTF-8 LC_ALL=zh_CN.UTF-8
 
-          # 三、设置root密码固定为 123456
+          # root密码
           echo "root:${ROOT_PWD}" | chpasswd
 
-          # 四、SSH配置：允许root密码远程登录
+          # SSH允许root密码登录
           sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config
           sed -i 's/#PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config
-          # 设置开机自启ssh服务
           systemctl enable ssh
 
-          # 五、清理缓存瘦身镜像体积
+          # 清理瘦身
           apt autoremove -y
           apt autoclean
           apt clean
           rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* /root/.bash_history
           INNER_SCRIPT
 
-          # 安全卸载绑定挂载点，避免打包损坏
+          # 卸载挂载点
           sudo umount ${ROOTFS_DIR}/sys
           sudo umount ${ROOTFS_DIR}/proc
           sudo umount ${ROOTFS_DIR}/dev
 
-          # 打包最终rootfs压缩包
-          cd ${ROOTFS_DIR}
-          sudo tar -zcpf ../${OUTPUT_TAR} .
-          ls -lh ../${OUTPUT_TAR}
+          # 打包到当前工作目录（关键修复）
+          cd "${ROOTFS_DIR}"
+          sudo tar -zcpf "${GITHUB_WORKSPACE}/${OUTPUT_TAR}" .
+          ls -lh "${GITHUB_WORKSPACE}/${OUTPUT_TAR}"
 
       - name: Upload RootFS Tarball to Artifacts
         uses: actions/upload-artifact@v4
@@ -113,3 +108,4 @@ jobs:
           name: ubuntu2604-amd64-huawei-rootfs
           path: ubuntu2604-resolute-amd64-huawei-source.tar.gz
           retention-days: 90
+

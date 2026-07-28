@@ -119,15 +119,7 @@ jobs:
           # 允许root密码登录，生产环境请注释这两行改用密钥登录
           sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config
           sed -i 's/#PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config
-          # Use rc.local to start ssh on boot (traditional init)
-           echo '#!/bin/sh -e' > /etc/rc.local
-           echo '/usr/sbin/service ssh start' >> /etc/rc.local
-           echo 'exit 0' >> /etc/rc.local
-           chmod +x /etc/rc.local
-           # Start ssh inside chroot for immediate test
-           service ssh start
-          # 设置root默认密码 root（务必在部署后修改）
-          echo "root:root" | chpasswd
+    
 
           ######################################################################
           # 5. 官方脚本安装 OpenClaw

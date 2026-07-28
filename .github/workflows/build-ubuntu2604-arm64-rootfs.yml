@@ -1,55 +1,60 @@
-name: Build Ubuntu 26.04 Resolute ARM64 RootFS via LXC
-run-name: LXC Build Ubuntu 26.04 resolute arm64 Full Localized RootFS + OpenClaw + SSH
+
+name: Build Ubuntu 26.04 Resolute ARM64 RootFS via LXD
+run-name: LXD Build Ubuntu 26.04 resolute arm64 Full Chinese + OpenClaw + SSH
 
 on:
   push:
-    branches: [ main, master ]
-  workflow_dispatch: # 手动触发
+    branches: [main, master]
+  workflow_dispatch:
 
 env:
   CODENAME: resolute
-  ARCH: arm64
-  LXC_CONTAINER_NAME: u2604-arm64-build
-  OUTPUT_TAR: ubuntu-26.04-resolute-arm64-lxc-rootfs.tar.xz
-  TIMEZONE: Asia/Shanghai
+  TARGET_ARCH: arm64
+  LXD_CT_NAME: u2604-arm64-builder
+  OUTPUT_ARCHIVE: ubuntu-26.04-resolute-arm64-lxd-rootfs.tar.xz
 
 jobs:
-  build_with_lxc:
+  build_rootfs:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout workspace
+      - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Install LXC + QEMU arm64 cross build dependencies
+      - name: Install LXD + QEMU cross compile dependencies
         run: |
           sudo apt update -qq
-          sudo apt install -y -qq lxc lxc-templates qemu-user-static binfmt-support xz-utils util-linux curl wget ca-certificates
-          # 注册arm64二进制模拟，LXC可直接跑aarch64容器
+          sudo apt install -y -qq lxd qemu-user-static binfmt-support xz-utils util-linux curl wget ca-certificates
+          # 开启arm64二进制模拟
           sudo update-binfmts --enable qemu-aarch64
-          # 初始化LXC
-          sudo lxd init --auto || true
+          # 将当前用户加入lxd组，避免sudo频繁授权
+          sudo usermod -aG lxd $USER
+          newgrp lxd <<EOF
+            lxd init --auto
+          EOF
 
-      - name: Configure LXC remote & Ubuntu official image source
+      - name: Configure official Ubuntu LXD remote (correct remote name)
         run: |
-          # 添加Ubuntu官方镜像源
-          sudo lxc remote add ubuntu-images https://images.lxd.canonical.com --protocol=lxd || true
-          sudo lxc remote list
+          # 官方正确远程名称：ubuntu，不是ubuntu-images
+          lxc remote remove ubuntu || true
+          lxc remote add ubuntu https://cloud-images.ubuntu.com/releases/ --protocol=lxd
+          lxc remote list
+          lxc image list ubuntu: | grep ${{ env.CODENAME }}
 
-      - name: Create & Start Ubuntu 26.04 arm64 LXC Container
+      - name: Launch Ubuntu 26.04 arm64 container
         run: |
-          # 从Ubuntu官方镜像拉取 resolute arm64
-          sudo lxc launch ubuntu-images:${{ env.CODENAME }}/${{ env.ARCH }} ${{ env.LXC_CONTAINER_NAME }}
-          # 等待容器网络与系统完全就绪
-          sleep 45
-          sudo lxc info ${{ env.LXC_CONTAINER_NAME }}
+          # 标准镜像格式 ubuntu:resolute/arm64
+          lxc launch ubuntu:${{ env.CODENAME }}/${{ env.TARGET_ARCH }} ${{ env.LXD_CT_NAME }}
+          # 长时间等待systemd、网络、apt就绪，arm64模拟启动较慢
+          sleep 90
+          lxc info ${{ env.LXD_CT_NAME }}
 
-      - name: Inside LXC container bulk configuration
+      - name: Execute bulk configuration inside LXD container
         run: |
-          sudo lxc exec ${{ env.LXC_CONTAINER_NAME }} -- bash <<'EOF'
+          lxc exec ${{ env.LXD_CT_NAME }} -- bash <<'CHROOT_EOF'
           set -euo pipefail
           CODENAME=resolute
 
-          # ========== 1. 替换APT源为华为云Ubuntu镜像源 ==========
+          # 1. Replace apt source to Huawei Cloud mirror
           cat > /etc/apt/sources.list <<LIST
           deb https://mirrors.huaweicloud.com/ubuntu/ ${CODENAME} main restricted universe multiverse
           deb https://mirrors.huaweicloud.com/ubuntu/ ${CODENAME}-security main restricted universe multiverse
@@ -60,21 +65,19 @@ jobs:
           apt update -qq
           apt full-upgrade -y -qq
 
-          # ========== 2. 完整中文本地化 + 时区 ==========
+          # 2. Full Chinese localization & Shanghai timezone
           locale-gen zh_CN.UTF-8
           update-locale LANG=zh_CN.UTF-8 LC_ALL=zh_CN.UTF-8 LC_MESSAGES=zh_CN.UTF-8
           echo 'LANG=zh_CN.UTF-8' > /etc/default/locale
           echo 'LC_ALL=zh_CN.UTF-8' >> /etc/default/locale
-
           timedatectl set-timezone Asia/Shanghai
 
-          # 中文语言包、中文字体、中文man手册
           apt install -y -qq \
             language-pack-zh-hans language-pack-zh-hans-base \
             fonts-wqy-zenhei fonts-noto-cjk fonts-noto-cjk-extra \
             manpages-zh ttf-mscorefonts-installer
 
-          # ========== 3. 最全常用工具大包（编译/网络/运维/磁盘/监控） ==========
+          # 3. Full common dev & ops toolchain
           apt install -y -qq \
             build-essential gcc g++ make cmake pkg-config libssl-dev libc6-dev git git-lfs \
             openssh-server net-tools iproute2 iputils-ping dnsutils traceroute mtr iftop nload \
@@ -85,49 +88,46 @@ jobs:
             sudo ca-certificates software-properties-common apt-transport-https gnupg2 \
             jq yq bc dos2unix uuid-runtime sysstat dmidecode hdparm util-linux
 
-          # ========== 4. OpenSSH systemd配置、开机自启、Root可登录 ==========
+          # 4. OpenSSH systemd config & auto start
           systemctl enable --now ssh
           sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config
           sed -i 's/#PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config
           systemctl reload sshd
-
-          # 设置root默认密码 root（生产务必修改/禁用密码登录）
           echo "root:root" | chpasswd
 
-          # ========== 5. 官方脚本安装 OpenClaw ==========
+          # 5. Install OpenClaw via official script
           curl -fsSL https://openclaw.ai/install.sh | bash
 
-          # ========== 6. 清理缓存减小镜像体积 ==========
+          # 6. Clean cache to shrink rootfs size
           apt autoremove -y -qq
           apt autoclean
           apt clean
           rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* /root/.cache/*
 
-          # 屏蔽apt不稳定CLI警告
+          # Hide apt unstable CLI warning
           echo 'APT::Get::Quiet::Warning "false";' > /etc/apt/apt.conf.d/99quiet
-          EOF
+          CHROOT_EOF
 
-      - name: Stop LXC container before export
+      - name: Stop container before export
         run: |
-          sudo lxc stop ${{ env.LXC_CONTAINER_NAME }}
-          sleep 10
+          lxc stop ${{ env.LXD_CT_NAME }}
+          sleep 15
 
-      - name: Export LXC container rootfs to tar.xz
+      - name: Export pure rootfs tar.xz (only filesystem, no LXD metadata)
         run: |
-          # LXC导出容器文件系统
-          sudo lxc export ${{ env.LXC_CONTAINER_NAME }} ./${{ env.OUTPUT_TAR}} --rootfs-only
-          ls -lh ./${{ env.OUTPUT_TAR}}
+          lxc export ${{ env.LXD_CT_NAME }} ./${{ env.OUTPUT_ARCHIVE }} --rootfs-only
+          ls -lh ./${{ env.OUTPUT_ARCHIVE }}
 
-      - name: Cleanup destroy LXC container
+      - name: Cleanup container always
         if: always()
         run: |
-          sudo lxc delete -f ${{ env.LXC_CONTAINER_NAME }} || true
+          lxc delete -f ${{ env.LXD_CT_NAME }} || true
 
-      - name: Upload rootfs artifact
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Ubuntu26.04-resolute-arm64-LXC-rootfs
-          path: ${{ env.OUTPUT_TAR }}
+          name: Ubuntu26.04-resolute-arm64-LXD-rootfs
+          path: ${{ env.OUTPUT_ARCHIVE }}
           retention-days: 90
 
 

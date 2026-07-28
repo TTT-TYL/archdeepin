@@ -1,13 +1,13 @@
-name: Build Ubuntu 26.04 Resolute arm64 RootFS (Base Tools + Docker)
+name: Build Ubuntu 26.04 Resolute amd64 Custom RootFS (Huawei Cloud Source)
 
 on:
   push:
-    branches: [ main ]
-  workflow_dispatch: # 支持手动点按钮触发构建
+    branches: [ main, master ]
+  workflow_dispatch: # 支持网页手动触发构建
 
 jobs:
-  build_rootfs:
-    runs-on: ubuntu-24.04
+  build-rootfs:
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -15,95 +15,101 @@ jobs:
       - name: Install build dependencies
         run: |
           sudo apt update
-          sudo apt install -y debootstrap qemu-user-static binfmt-support tar gzip xz-utils rsync coreutils
+          sudo apt install -y debootstrap qemu-user-static binfmt-support tar xz-utils coreutils rsync
 
-      - name: Enable binfmt_misc for ARM64 emulation
+      - name: Build & Customize RootFS with Huawei Cloud APT source
         run: |
-          sudo update-binfmts --enable qemu-aarch64
-          qemu-aarch64-static --version
+          # 全局变量定义
+          export CODENAME="resolute"
+          export ARCH="amd64"
+          export ROOTFS_DIR="$HOME/ubuntu2604-resolute-amd64-rootfs"
+          export OUTPUT_TAR="ubuntu2604-resolute-amd64-huawei-source.tar.gz"
+          # 华为云Ubuntu官方源
+          export HUAWEI_MIRROR="https://mirrors.huaweicloud.com/ubuntu"
+          export ROOT_PWD="123456"
 
-      - name: Build Ubuntu 26.04 Resolute arm64 minimal rootfs
-        env:
-          CODENAME: resolute
-          ARCH: arm64
-          ROOTFS_DIR: ./ubuntu2604-resolute-arm64-rootfs
-          MIRROR: https://mirrors.aliyun.com/ubuntu-ports
-        run: |
-          set -e
-          rm -rf ${ROOTFS_DIR}
-          mkdir -p ${ROOTFS_DIR}
+          # 清理旧目录
+          rm -rf "${ROOTFS_DIR}"
+          mkdir -p "${ROOTFS_DIR}"
 
-          # Bootstrap 最小化minbase系统
+          # 1. debootstrap 拉取最小化Ubuntu 26.04 amd64
           sudo debootstrap \
             --variant=minbase \
             --arch=${ARCH} \
             ${CODENAME} \
             ${ROOTFS_DIR} \
-            ${MIRROR}
+            ${HUAWEI_MIRROR}
 
-          # 注入qemu静态二进制用于chroot内arm64执行
-          sudo cp $(which qemu-aarch64-static) ${ROOTFS_DIR}/usr/bin/
-
-          # 替换ARM架构APT源
+          # 2. 写入【华为云APT软件源】核心修改
           sudo tee ${ROOTFS_DIR}/etc/apt/sources.list <<EOF
-          deb ${MIRROR} ${CODENAME} main restricted universe multiverse
-          deb ${MIRROR} ${CODENAME}-updates main restricted universe multiverse
-          deb ${MIRROR} ${CODENAME}-backports main restricted universe multiverse
-          deb http://ports.ubuntu.com/ ${CODENAME}-security main restricted universe multiverse
+          deb ${HUAWEI_MIRROR} ${CODENAME} main restricted universe multiverse
+          deb ${HUAWEI_MIRROR} ${CODENAME}-updates main restricted universe multiverse
+          deb ${HUAWEI_MIRROR} ${CODENAME}-backports main restricted universe multiverse
+          deb ${HUAWEI_MIRROR} ${CODENAME}-security main restricted universe multiverse
           EOF
 
-          # 主机名、hosts、DNS配置
-          echo "ubuntu2604-resolute-arm64" | sudo tee ${ROOTFS_DIR}/etc/hostname
+          # 3. 基础系统配置：主机名、hosts、DNS
+          echo "ubuntu2604-amd64-huawei" | sudo tee ${ROOTFS_DIR}/etc/hostname
           sudo tee ${ROOTFS_DIR}/etc/hosts <<EOF
-          127.0.0.1   localhost ubuntu2604-resolute-arm64::1         ip6-localhost ip6-loopback
+          127.0.0.1   localhost ubuntu2604-amd64-huawei::1         ip6-localhost ip6-loopback
           EOF
           echo "nameserver 223.5.5.5" | sudo tee ${ROOTFS_DIR}/etc/resolv.conf
           echo "nameserver 114.114.114.114" | sudo tee -a ${ROOTFS_DIR}/etc/resolv.conf
 
-          # Chroot内部安装基础工具 + Docker CE
-          sudo chroot ${ROOTFS_DIR} /usr/bin/qemu-aarch64-static /bin/bash <<INNER
+          # 4. 挂载内核文件系统，进入真实chroot定制系统
+          sudo mount --bind /dev ${ROOTFS_DIR}/dev
+          sudo mount --bind /proc ${ROOTFS_DIR}/proc
+          sudo mount --bind /sys ${ROOTFS_DIR}/sys
+
+          # ===================== chroot内部执行脚本 =====================
+          sudo chroot ${ROOTFS_DIR} /bin/bash <<INNER_SCRIPT
           set -e
           apt update
 
-          # 预装基础常用软件包
+          # 一、批量安装常用工具、编译环境、服务组件
           apt install -y --no-install-recommends \
-            apt-transport-https ca-certificates gnupg2 openssl sudo \
-            curl wget git vim-tiny nano tree htop ncdu \
-            iproute2 net-tools iputils-ping dnsutils traceroute \
-            zip unzip tar xz-utils bzip2 build-essential make gcc g++ cmake tzdata locales
+          apt-transport-https ca-certificates gnupg2 openssl sudo \
+          curl wget git vim nano tree htop ncdu iftop iotop \
+          iproute2 net-tools iputils-ping dnsutils traceroute mtr \
+          zip unzip tar xz-utils bzip2 lz4 zstd \
+          build-essential make gcc g++ cmake pkg-config gdb \
+          openssh-server cron logrotate tzdata locales systemd
 
-          # 时区上海 + 中文UTF-8
+          # 二、时区 + 完整中文本地化
           ln -sf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime
           echo "Asia/Shanghai" > /etc/timezone
           locale-gen zh_CN.UTF-8
-          update-locale LANG=zh_CN.UTF-8
+          update-locale LANG=zh_CN.UTF-8 LC_ALL=zh_CN.UTF-8
 
-          # 官方Docker CE 安装（resolute版本）
-          curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
-          echo "deb [arch=arm64 signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu resolute stable" | tee /etc/apt/sources.list.d/docker.list
+          # 三、设置root密码固定为 123456
+          echo "root:${ROOT_PWD}" | chpasswd
 
-          apt update
-          apt install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
+          # 四、SSH配置：允许root密码远程登录
+          sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config
+          sed -i 's/#PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config
+          # 设置开机自启ssh服务
+          systemctl enable ssh
 
-          # root加入docker免sudo组
-          usermod -aG docker root
-
-          # 深度清理，减小rootfs体积
+          # 五、清理缓存瘦身镜像体积
           apt autoremove -y
           apt autoclean
           apt clean
-          rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
-          INNER
+          rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* /root/.bash_history
+          INNER_SCRIPT
 
-          # 删除qemu-static，成品rootfs不需要
-          sudo rm -f ${ROOTFS_DIR}/usr/bin/qemu-aarch64-static
+          # 安全卸载绑定挂载点，避免打包损坏
+          sudo umount ${ROOTFS_DIR}/sys
+          sudo umount ${ROOTFS_DIR}/proc
+          sudo umount ${ROOTFS_DIR}/dev
 
-          # 打包最终压缩包
-          sudo tar -zcpf ubuntu2604-resolute-arm64-docker-rootfs.tar.gz -C ${ROOTFS_DIR} .
+          # 打包最终rootfs压缩包
+          cd ${ROOTFS_DIR}
+          sudo tar -zcpf ../${OUTPUT_TAR} .
+          ls -lh ../${OUTPUT_TAR}
 
-      - name: Upload build artifact to Actions
+      - name: Upload RootFS Tarball to Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: ubuntu2604-resolute-arm64-rootfs-with-docker
-          path: ubuntu2604-resolute-arm64-docker-rootfs.tar.gz
+          name: ubuntu2604-amd64-huawei-rootfs
+          path: ubuntu2604-resolute-amd64-huawei-source.tar.gz
           retention-days: 90

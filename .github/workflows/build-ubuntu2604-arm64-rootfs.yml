@@ -114,7 +114,7 @@ jobs:
             # 系统监控性能工具
             htop iotop iftop atop sysstat lsof strace ltrace procps psmisc \
             # 磁盘文件系统工具
-            parted fdisk lsblk blkid e2fsprogs dosfstools ntfs-3g mountall \
+            parted fdisk lsblk blkid e2fsprogs dosfstools ntfs-3g \
             # 编译开发基础套件
             build-essential gcc g++ make cmake pkg-config git-core libtool autoconf automake \
             libopencl-dev clinfo ocl-icd-opencl-dev \

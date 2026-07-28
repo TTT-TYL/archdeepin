@@ -1,4 +1,4 @@
-name: Build Ubuntu 26.04 Resolute amd64 Custom RootFS (Huawei Cloud Source)
+name: Build Ubuntu 26.04 Resolute amd64 RootFS (Fix su auth failure)
 
 on:
   push:
@@ -17,19 +17,19 @@ jobs:
           sudo apt update
           sudo apt install -y debootstrap qemu-user-static binfmt-support tar xz-utils coreutils rsync
 
-      - name: Build & Customize RootFS with Huawei Cloud APT source
+      - name: Build & Customize RootFS (Huawei Cloud Source + su bug fixed)
         run: |
           export CODENAME="resolute"
           export ARCH="amd64"
           export ROOTFS_DIR="$HOME/ubuntu2604-resolute-amd64-rootfs"
-          export OUTPUT_TAR="ubuntu2604-resolute-amd64-huawei-source.tar.gz"
+          export OUTPUT_TAR="ubuntu2604-resolute-amd64-huawei-fixed-rootfs.tar.gz"
           export HUAWEI_MIRROR="https://mirrors.huaweicloud.com/ubuntu"
           export ROOT_PWD="123456"
 
           rm -rf "${ROOTFS_DIR}"
           mkdir -p "${ROOTFS_DIR}"
 
-          # 拉取rootfs
+          # 拉取最小rootfs
           sudo debootstrap \
             --variant=minbase \
             --arch=${ARCH} \
@@ -37,7 +37,7 @@ jobs:
             ${ROOTFS_DIR} \
             ${HUAWEI_MIRROR}
 
-          # 华为云源写入
+          # 写入华为云软件源
           sudo tee ${ROOTFS_DIR}/etc/apt/sources.list <<EOF
           deb ${HUAWEI_MIRROR} ${CODENAME} main restricted universe multiverse
           deb ${HUAWEI_MIRROR} ${CODENAME}-updates main restricted universe multiverse
@@ -45,10 +45,10 @@ jobs:
           deb ${HUAWEI_MIRROR} ${CODENAME}-security main restricted universe multiverse
           EOF
 
-          # 基础网络配置
+          # 基础主机名、hosts、DNS
           echo "ubuntu2604-amd64-huawei" | sudo tee ${ROOTFS_DIR}/etc/hostname
           sudo tee ${ROOTFS_DIR}/etc/hosts <<EOF
-          127.0.0.1   localhost ubuntu2604-amd64-huawei::1         ip6-localhost ip6-loopback
+          127.0.0.1   localhost ubuntu2604-amd64-huawei  ::1         ip6-localhost ip6-loopback
           EOF
           echo "nameserver 223.5.5.5" | sudo tee ${ROOTFS_DIR}/etc/resolv.conf
           echo "nameserver 114.114.114.114" | sudo tee -a ${ROOTFS_DIR}/etc/resolv.conf
@@ -58,54 +58,74 @@ jobs:
           sudo mount --bind /proc ${ROOTFS_DIR}/proc
           sudo mount --bind /sys ${ROOTFS_DIR}/sys
 
-          # chroot内部配置
+          # ===================== chroot 内部完整加固脚本 =====================
           sudo chroot ${ROOTFS_DIR} /bin/bash <<INNER_SCRIPT
           set -e
           apt update
 
+          # 安装基础工具、编译环境、SSH、PAM核心包（强制带上pam避免缺失）
           apt install -y --no-install-recommends \
           apt-transport-https ca-certificates gnupg2 openssl sudo \
           curl wget git vim nano tree htop ncdu iftop iotop \
           iproute2 net-tools iputils-ping dnsutils traceroute mtr \
           zip unzip tar xz-utils bzip2 lz4 zstd \
           build-essential make gcc g++ cmake pkg-config gdb \
-          openssh-server cron logrotate tzdata locales systemd
+          openssh-server cron logrotate tzdata locales systemd \
+          libpam-modules libpam-runtime passwd shadow
 
-          # 时区中文
+          # 时区 + 完整中文本地化
           ln -sf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime
           echo "Asia/Shanghai" > /etc/timezone
           locale-gen zh_CN.UTF-8
           update-locale LANG=zh_CN.UTF-8 LC_ALL=zh_CN.UTF-8
 
-          # root密码
-          echo "root:${ROOT_PWD}" | chpasswd
+          # ========== 【关键修复1】可靠设置root密码，替代chpasswd ==========
+          passwd --stdin root <<PWD_EOF
+          ${ROOT_PWD}
+          ${ROOT_PWD}
+          PWD_EOF
+          # 强制解锁root账户，避免账号锁定导致认证失败
+          passwd -u root
 
-          # SSH允许root密码登录
+          # ========== 【关键修复2】修复su SUID权限，解压不会丢失 ==========
+          chmod u+s /bin/su
+
+          # ========== 【关键修复3】修复passwd/shadow权限与文件锁定属性 ==========
+          chmod 644 /etc/passwd
+          chmod 600 /etc/shadow
+          chattr -ia /etc/passwd /etc/shadow
+
+          # ========== 【关键修复4】放开PAM su wheel组限制 ==========
+          sed -i 's/^auth.*pam_wheel.so/#&/' /etc/pam.d/su
+
+          # SSH配置：允许root密码登录并开机自启
           sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config
           sed -i 's/#PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config
           systemctl enable ssh
 
-          # 清理瘦身
+          # 系统瘦身清理
           apt autoremove -y
           apt autoclean
           apt clean
           rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* /root/.bash_history
           INNER_SCRIPT
 
-          # 卸载挂载点
+          # 安全卸载挂载点
           sudo umount ${ROOTFS_DIR}/sys
           sudo umount ${ROOTFS_DIR}/proc
           sudo umount ${ROOTFS_DIR}/dev
 
-          # 打包到当前工作目录（关键修复）
+          # 打包输出到 GitHub 工作目录，确保上传插件能找到文件
           cd "${ROOTFS_DIR}"
           sudo tar -zcpf "${GITHUB_WORKSPACE}/${OUTPUT_TAR}" .
           ls -lh "${GITHUB_WORKSPACE}/${OUTPUT_TAR}"
 
-      - name: Upload RootFS Tarball to Artifacts
+      - name: Upload RootFS Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ubuntu2604-amd64-huawei-rootfs
-          path: ubuntu2604-resolute-amd64-huawei-source.tar.gz
+          name: ubuntu2604-amd64-fixed-rootfs
+          path: ubuntu2604-resolute-amd64-huawei-fixed-rootfs.tar.gz
           retention-days: 90
+
+
 

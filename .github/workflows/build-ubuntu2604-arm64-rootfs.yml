@@ -1,136 +1,157 @@
-name: Build Ubuntu 26.04 ARM64 LXC RootFS | ZH + OpenClaw + SSH
-run-name: LXC Special Ubuntu 26.04 arm64 rootfs Full Chinese OpenClaw
+name: Debootstrap + Unshare Chroot Build Ubuntu26.04 ARM64 RootFS
+run-name: resolute arm64 rootfs | Huawei source | Chinese | OpenClaw | SSH
 
 on:
   push:
-    branches: [ main ]
+    branches: [main, master]
   workflow_dispatch:
 
+env:
+  CODENAME: resolute
+  TARGET_ARCH: arm64
+  ROOTFS_DIR: ./ubuntu-resolute-arm64-rootfs
+  FINAL_ARCHIVE: ubuntu-26.04-resolute-arm64-custom-rootfs.tar.xz
+
 jobs:
-  build_lxc_rootfs:
+  build-rootfs:
     runs-on: ubuntu-latest
     steps:
-      - name: 安装宿主机构建依赖（QEMU跨架构+debootstrap）
+      - name: Checkout empty workspace
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
         run: |
-          sudo apt update
-          sudo apt install -y debootstrap qemu-user-static binfmt-support \
-            coreutils rsync tar gzip locales wget curl git unzip
+          sudo apt update -qq
+          sudo apt install -y -qq \
+            debootstrap qemu-user-static binfmt-support \
+            xz-utils tar coreutils curl wget ca-certificates util-linux
+          # 启用arm64跨架构二进制模拟
           sudo update-binfmts --enable qemu-aarch64
 
-      - name: 定义全局环境变量
-        id: set_vars
+      # Step1: debootstrap 官方源拉取基础arm64 rootfs（构建源强制官方archive）
+      - name: Stage1 Debootstrap official source base rootfs
         run: |
-          echo "ROOTFS_BASE=$HOME/lxc-ubuntu2604-arm64" >> $GITHUB_ENV
-          echo "CODENAME=plucky" >> $GITHUB_ENV
-          echo "ARCH=arm64" >> $GITHUB_ENV
-          echo "OUTPUT_TAR=lxc-ubuntu2604-plucky-arm64-zh-openclaw.tar.gz" >> $GITHUB_ENV
+          sudo rm -rf ${{ env.ROOTFS_DIR }}
+          sudo mkdir -p ${{ env.ROOTFS_DIR }}
 
-      - name: debootstrap 最小化拉取ARM64 Ubuntu26.04基础系统
-        run: |
-          sudo rm -rf ${{ env.ROOTFS_BASE }}
-          sudo mkdir -p ${{ env.ROOTFS_BASE }}
+          # --foreign 跨架构一阶引导，源为Ubuntu官方
           sudo debootstrap \
-            --arch=${{ env.ARCH }} \
-            --variant=minbase \
-            --components=main,universe,restricted \
+            --arch=${{ env.TARGET_ARCH }} \
+            --foreign \
             ${{ env.CODENAME }} \
-            ${{ env.ROOTFS_BASE }} \
-            http://ports.ubuntu.com/ubuntu-ports/
+            ${{ env.ROOTFS_DIR }} \
+            http://archive.ubuntu.com/ubuntu/
 
-          sudo cp /usr/bin/qemu-aarch64-static ${{ env.ROOTFS_BASE }}/usr/bin/
+          # 注入qemu静态二进制用于chroot执行arm64程序
+          sudo cp /usr/bin/qemu-aarch64-static ${{ env.ROOTFS_DIR }}/usr/bin/
 
-      - name: Chroot 深度定制 LXC 专用系统
+          # 二阶完成debootstrap基础安装
+          sudo chroot ${{ env.ROOTFS_DIR }} /bin/bash -c "/debootstrap/debootstrap --second-stage"
+
+      # Step2: 准备挂载点，unshare 创建隔离命名空间后进入chroot配置
+      - name: Stage2 Unshare + Chroot full system configure
         run: |
-          sudo mount --bind /dev ${{ env.ROOTFS_BASE }}/dev
-          sudo mount --bind /proc ${{ env.ROOTFS_BASE }}/proc
-          sudo mount --bind /sys ${{ env.ROOTFS_BASE }}/sys
+          # 绑定必要虚拟文件系统
+          sudo mount --bind /dev ${{ env.ROOTFS_DIR }}/dev
+          sudo mount --bind /dev/pts ${{ env.ROOTFS_DIR }}/dev/pts
+          sudo mount --bind /proc ${{ env.ROOTFS_DIR }}/proc
+          sudo mount --bind /sys ${{ env.ROOTFS_DIR }}/sys
 
-          sudo chroot ${{ env.ROOTFS_BASE }} /bin/bash <<'INNER_SCRIPT'
-          set -e
+          # 使用unshare隔离PID、挂载命名空间，再执行chroot内部配置脚本
+          sudo unshare --pid --mount --fork bash <<'ROOTFS_CONFIG'
+          set -euo pipefail
+          export CODENAME=resolute
+          export ROOTFS_DIR=./ubuntu-resolute-arm64-rootfs
 
-          # 华为云arm64源
-          cat > /etc/apt/sources.list <<EOF
-          deb https://mirrors.huaweicloud.com/ubuntu-ports/ plucky main restricted universe multiverse
-          deb https://mirrors.huaweicloud.com/ubuntu-ports/ plucky-updates main restricted universe multiverse
-          deb https://mirrors.huaweicloud.com/ubuntu-ports/ plucky-backports main restricted universe multiverse
-          deb https://mirrors.huaweicloud.com/ubuntu-ports/ plucky-security main restricted universe multiverse
-          EOF
-          apt update
+          # ====================== 1. 替换内部APT源为华为云 ======================
+          cat > ${ROOTFS_DIR}/etc/apt/sources.list <<LIST
+          deb https://mirrors.huaweicloud.com/ubuntu/ ${CODENAME} main restricted universe multiverse
+          deb https://mirrors.huaweicloud.com/ubuntu/ ${CODENAME}-security main restricted universe multiverse
+          deb https://mirrors.huaweicloud.com/ubuntu/ ${CODENAME}-updates main restricted universe multiverse
+          deb https://mirrors.huaweicloud.com/ubuntu/ ${CODENAME}-backports main restricted universe multiverse
+          LIST
 
-          # 完整中文本地化
-          apt install -y language-pack-zh-hans language-pack-zh-hans-base \
-            fonts-noto-cjk fonts-wqy-microhei locales
-          locale-gen zh_CN.UTF-8
+          # 仅update，严格禁止 apt full-upgrade
+          chroot ${ROOTFS_DIR} apt update -qq
 
-          cat > /etc/default/locale <<LOCALE_CFG
-          LANG="zh_CN.UTF-8"
-          LANGUAGE="zh_CN:zh"
-          LC_ALL="zh_CN.UTF-8"
-          LOCALE_CFG
+          # ====================== 2. 完整中文本地化环境 ======================
+          chroot ${ROOTFS_DIR} locale-gen zh_CN.UTF-8
+          chroot ${ROOTFS_DIR} update-locale LANG=zh_CN.UTF-8 LC_ALL=zh_CN.UTF-8 LC_MESSAGES=zh_CN.UTF-8
+          echo 'LANG=zh_CN.UTF-8' > ${ROOTFS_DIR}/etc/default/locale
+          echo 'LC_ALL=zh_CN.UTF-8' >> ${ROOTFS_DIR}/etc/default/locale
+          echo "Asia/Shanghai" > ${ROOTFS_DIR}/etc/timezone
+          ln -sf /usr/share/zoneinfo/Asia/Shanghai ${ROOTFS_DIR}/etc/localtime
 
-          echo 'export LANG=zh_CN.UTF-8' >> /etc/profile
-          echo 'export LC_ALL=zh_CN.UTF-8' >> /etc/profile
+          # 中文语言包、中文字体、中文man手册
+          chroot ${ROOTFS_DIR} apt install -y -qq \
+            language-pack-zh-hans language-pack-zh-hans-base \
+            fonts-wqy-zenhei fonts-noto-cjk fonts-noto-cjk-extra \
+            manpages-zh ttf-mscorefonts-installer
 
-          # ===================== 修复后的安装包列表（重点修改）=====================
-          apt install -y --no-install-recommends \
-            openssh-server openssh-client sudo vim nano tmux htop iotop iftop \
-            net-tools iproute2 dnsutils traceroute curl wget git make cmake gcc g++ \
-            build-essential zip unzip tar gzip bzip2 lz4 rsync tree ncdu util-linux \
-            ca-certificates tzdata systemd cron logrotate man-db dbus \
-            libpam-modules libpam-runtime passwd
+          # ====================== 3. 【已修复】常用工具软件包列表 ======================
+          chroot ${ROOTFS_DIR} apt install -y -qq \
+            build-essential gcc g++ make cmake pkg-config libssl-dev libc6-dev git git-lfs \
+            openssh-server net-tools iproute2 iputils-ping dnsutils traceroute mtr iftop nload \
+            tcpdump socat ncftp rsync wget curl axel aria2 nmap ipset iptables wireguard-tools \
+            fdisk parted e2fsprogs dosfstools ntfs-3g squashfs-tools \
+            htop atop iotop bmon tree vim nano less cron logrotate lsof psmisc screen tmux \
+            zip unzip unrar p7zip-full gzip bzip2 xz-utils zstd pigz \
+            sudo ca-certificates software-properties-common apt-transport-https gnupg2 \
+            jq yq bc dos2unix uuid-runtime sysstat dmidecode hdparm util-linux
 
-          # 时区
-          ln -sf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime
-          echo "Asia/Shanghai" > /etc/timezone
+          # ====================== 4. OpenSSH 配置（可root密码登录，测试用） ======================
+          sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' ${ROOTFS_DIR}/etc/ssh/sshd_config
+          sed -i 's/#PasswordAuthentication no/PasswordAuthentication yes/' ${ROOTFS_DIR}/etc/ssh/sshd_config
+          # 设置root密码 root
+          echo "root:root" | chroot ${ROOTFS_DIR} chpasswd
 
-          # SSH允许root密码登录
-          sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config
-          sed -i 's/#PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config
-          systemctl enable ssh
+          # ====================== 5. OpenClaw 官方一键安装脚本 ======================
+          chroot ${ROOTFS_DIR} bash -c 'curl -fsSL https://openclaw.ai/install.sh | bash'
 
-          # root密码123456
-          echo 'root:123456' | chpasswd
+          # ====================== 6. 清理缓存瘦身 ======================
+          chroot ${ROOTFS_DIR} apt autoremove -y -qq
+          chroot ${ROOTFS_DIR} apt autoclean
+          chroot ${ROOTFS_DIR} apt clean
+          rm -rf ${ROOTFS_DIR}/var/lib/apt/lists/* ${ROOTFS_DIR}/tmp/* ${ROOTFS_DIR}/var/tmp/* ${ROOTFS_DIR}/root/.cache/*
 
-          # LXC适配优化
-          systemctl mask dev-mqueue.mount dev-hugepages.mount sys-fs-fuse-connections.mount
-          rm -f /etc/machine-id
-          touch /etc/machine-id
-          echo "" > /etc/hostname
-          echo "nameserver 114.114.114.114" > /etc/resolv.conf
-          sed -i 's/#DefaultTimeoutStartSec=90s/DefaultTimeoutStartSec=30s/' /etc/systemd/system.conf
+          # 屏蔽apt CLI警告
+          echo 'APT::Get::Quiet::Warning "false";' > ${ROOTFS_DIR}/etc/apt/apt.conf.d/99quiet
 
-          # 安装Node.js + pnpm + OpenClaw
-          curl -fsSL https://deb.nodesource.com/setup_18.x | bash -
-          apt install -y nodejs npm
-          npm install -g pnpm
+          # 退出unshare命名空间
+          exit
+          ROOTFS_CONFIG
 
-          curl -fsSL https://openclaw.ai/install.sh | bash -s -- --no-onboard
-          openclaw --version || true
-
-          # 清理
-          apt autoremove -y
-          apt autoclean
-          apt clean
-          rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
-          rm -rf /var/cache/apt/* /root/.bash_history
-          INNER_SCRIPT
-
-          sudo umount ${{ env.ROOTFS_BASE }}/sys
-          sudo umount ${{ env.ROOTFS_BASE }}/proc
-          sudo umount ${{ env.ROOTFS_BASE }}/dev
-
-      - name: 打包LXC标准压缩包
+      # Step3: 卸载所有绑定挂载（防止打包文件损坏）
+      - name: Umount bind mounts safely
         run: |
-          cd ${{ env.ROOTFS_BASE }}
-          sudo tar -zcpf $GITHUB_WORKSPACE/${{ env.OUTPUT_TAR }} .
-          ls -lh $GITHUB_WORKSPACE/${{ env.OUTPUT_TAR }}
+          sudo umount ${{ env.ROOTFS_DIR }}/sys || true
+          sudo umount ${{ env.ROOTFS_DIR }}/proc || true
+          sudo umount ${{ env.ROOTFS_DIR }}/dev/pts || true
+          sudo umount ${{ env.ROOTFS_DIR }}/dev || true
 
-      - name: 上传制品
+      # Step4: 打包最终rootfs为xz压缩包
+      - name: Compress final rootfs to tar.xz
+        run: |
+          cd ${{ env.ROOTFS_DIR }}
+          sudo tar -cJf ../${{ env.FINAL_ARCHIVE }} .
+          cd ..
+          ls -lh ${{ env.FINAL_ARCHIVE }}
+
+      # Step5: 上传产物到Action Artifact
+      - name: Upload built rootfs archive
         uses: actions/upload-artifact@v4
         with:
-          name: lxc-ubuntu2604-arm64-zh-openclaw-rootfs
-          path: ${{ env.OUTPUT_TAR }}
+          name: Ubuntu26.04-resolute-arm64-debootstrap-unshare-rootfs
+          path: ${{ env.FINAL_ARCHIVE }}
           retention-days: 90
+
+      # Step6: 清理临时目录
+      - name: Cleanup temp files
+        if: always()
+        run: |
+          sudo rm -rf ${{ env.ROOTFS_DIR }} || true
+
+
 
 
 

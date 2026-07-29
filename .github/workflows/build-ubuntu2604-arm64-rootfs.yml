@@ -1,5 +1,5 @@
-name: Debootstrap + Snap LXD Build Ubuntu26.04 resolute ARM64 RootFS
-run-name: debootstrap base rootfs -> LXD systemd full config
+name: Debootstrap + Unshare Chroot Build Ubuntu26.04 ARM64 RootFS
+run-name: resolute arm64 rootfs | Huawei source | Chinese | OpenClaw | SSH
 
 on:
   push:
@@ -8,112 +8,88 @@ on:
 
 env:
   CODENAME: resolute
-  ARCH: arm64
-  DEBOOT_ROOTFS: ./tmp-deb-rootfs
-  LXD_IMG_ALIAS: u2604-arm64-custom
-  LXD_CT: u2604-config-container
-  OUTPUT_TAR: ubuntu-26.04-resolute-arm64-final-rootfs.tar.xz
+  TARGET_ARCH: arm64
+  ROOTFS_DIR: ./ubuntu-resolute-arm64-rootfs
+  FINAL_ARCHIVE: ubuntu-26.04-resolute-arm64-custom-rootfs.tar.xz
 
 jobs:
-  build:
+  build-rootfs:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout workspace
+      - name: Checkout empty workspace
         uses: actions/checkout@v4
 
-      - name: Install build dependencies & Snap LXD
+      - name: Install build dependencies
         run: |
           sudo apt update -qq
           sudo apt install -y -qq \
-            debootstrap qemu-user-static binfmt-support xz-utils util-linux \
-            curl wget ca-certificates tar coreutils
+            debootstrap qemu-user-static binfmt-support \
+            xz-utils tar coreutils curl wget ca-certificates util-linux
+          # 启用arm64跨架构二进制模拟
+          sudo update-binfmts --enable qemu-aarch64
 
-          # Snap 安装官方 LXD
-          sudo snap install lxd
-          sudo usermod -aG lxd $USER
-          # 初始化，不操作静态内置 remote
-          sg lxd -c "lxd init --auto"
-
-      # 1. debootstrap 官方源构建 arm64 基础 rootfs
-      - name: Debootstrap official Ubuntu archive rootfs
+      # Step1: debootstrap 官方源拉取基础arm64 rootfs（构建源强制官方archive）
+      - name: Stage1 Debootstrap official source base rootfs
         run: |
-          sudo rm -rf ${{ env.DEBOOT_ROOTFS }}
-          sudo mkdir -p ${{ env.DEBOOT_ROOTFS }}
+          sudo rm -rf ${{ env.ROOTFS_DIR }}
+          sudo mkdir -p ${{ env.ROOTFS_DIR }}
+
+          # --foreign 跨架构一阶引导，源为Ubuntu官方
           sudo debootstrap \
-            --arch=${{ env.ARCH }} \
+            --arch=${{ env.TARGET_ARCH }} \
             --foreign \
             ${{ env.CODENAME }} \
-            ${{ env.DEBOOT_ROOTFS }} \
+            ${{ env.ROOTFS_DIR }} \
             http://archive.ubuntu.com/ubuntu/
 
-          # 注入 qemu-aarch64-static 完成二阶引导
-          sudo cp /usr/bin/qemu-aarch64-static ${{ env.DEBOOT_ROOTFS }}/usr/bin/
-          sudo chroot ${{ env.DEBOOT_ROOTFS }} /bin/bash -c "/debootstrap/debootstrap --second-stage"
+          # 注入qemu静态二进制用于chroot执行arm64程序
+          sudo cp /usr/bin/qemu-aarch64-static ${{ env.ROOTFS_DIR }}/usr/bin/
 
-      # 2. 打包 + 生成 LXD 严格合规 metadata.yaml（修复时间戳类型错误）
-      - name: Create valid LXD import bundle
+          # 二阶完成debootstrap基础安装
+          sudo chroot ${{ env.ROOTFS_DIR }} /bin/bash -c "/debootstrap/debootstrap --second-stage"
+
+      # Step2: 准备挂载点，unshare 创建隔离命名空间后进入chroot配置
+      - name: Stage2 Unshare + Chroot full system configure
         run: |
-          # 打包根文件系统
-          cd ${{ env.DEBOOT_ROOTFS }}
-          sudo tar -cf ../raw-rootfs.tar .
-          cd ..
+          # 绑定必要虚拟文件系统
+          sudo mount --bind /dev ${{ env.ROOTFS_DIR }}/dev
+          sudo mount --bind /dev/pts ${{ env.ROOTFS_DIR }}/dev/pts
+          sudo mount --bind /proc ${{ env.ROOTFS_DIR }}/proc
+          sudo mount --bind /sys ${{ env.ROOTFS_DIR }}/sys
 
-          # 关键：creation_date 使用 Unix 时间戳整数
-          TS=$(date +%s)
-          cat > metadata.yaml <<EOF
-          architecture: aarch64
-          os: ubuntu
-          release: resolute
-          variant: default
-          creation_date: $TS
-          EOF
- 
-          # 打包 LXD 导入包
-          tar -cf lxd-import-bundle.tar metadata.yaml raw-rootfs.tar
-          ls -l lxd-import-bundle.tar
-
-      # 3. LXD 导入镜像并启动容器
-      - name: Import custom image & launch container
-        run: |
-          sg lxd -c "lxc image import lxd-import-bundle.tar --alias ${{ env.LXD_IMG_ALIAS }}"
-          sg lxd -c "lxc launch ${{ env.LXD_IMG_ALIAS }} ${{ env.LXD_CT }}"
-          # QEMU 模拟 ARM64 启动极慢，长时间等待 systemd 就绪
-          sleep 150
-          sg lxd -c "lxc info ${{ env.LXD_CT }}"
-
-      # 4. 容器内全套配置：华为源、中文、工具、SSH、OpenClaw
-      - name: Full system configuration inside LXD
-        run: |
-          sg lxd -c "lxc exec ${{ env.LXD_CT }} -- bash <<'CONFIG_EOF'
+          # 使用unshare隔离PID、挂载命名空间，再执行chroot内部配置脚本
+          sudo unshare --pid --mount --fork bash <<'ROOTFS_CONFIG'
           set -euo pipefail
-          CODENAME=resolute
+          export CODENAME=resolute
+          export ROOTFS_DIR=./ubuntu-resolute-arm64-rootfs
 
-          # 替换 APT 源为华为云
-          cat > /etc/apt/sources.list <<LIST
+          # ====================== 1. 替换内部APT源为华为云 ======================
+          cat > ${ROOTFS_DIR}/etc/apt/sources.list <<LIST
           deb https://mirrors.huaweicloud.com/ubuntu/ ${CODENAME} main restricted universe multiverse
           deb https://mirrors.huaweicloud.com/ubuntu/ ${CODENAME}-security main restricted universe multiverse
           deb https://mirrors.huaweicloud.com/ubuntu/ ${CODENAME}-updates main restricted universe multiverse
           deb https://mirrors.huaweicloud.com/ubuntu/ ${CODENAME}-backports main restricted universe multiverse
           LIST
 
-          apt update -qq
-          apt full-upgrade -y -qq
+          # 仅update，严格禁止 apt full-upgrade
+          chroot ${ROOTFS_DIR} apt update -qq
 
-          # 完整中文本地化 + 上海时区
-          locale-gen zh_CN.UTF-8
-          update-locale LANG=zh_CN.UTF-8 LC_ALL=zh_CN.UTF-8 LC_MESSAGES=zh_CN.UTF-8
-          echo 'LANG=zh_CN.UTF-8' > /etc/default/locale
-          echo 'LC_ALL=zh_CN.UTF-8' >> /etc/default/locale
-          timedatectl set-timezone Asia/Shanghai
+          # ====================== 2. 完整中文本地化环境 ======================
+          chroot ${ROOTFS_DIR} locale-gen zh_CN.UTF-8
+          chroot ${ROOTFS_DIR} update-locale LANG=zh_CN.UTF-8 LC_ALL=zh_CN.UTF-8 LC_MESSAGES=zh_CN.UTF-8
+          echo 'LANG=zh_CN.UTF-8' > ${ROOTFS_DIR}/etc/default/locale
+          echo 'LC_ALL=zh_CN.UTF-8' >> ${ROOTFS_DIR}/etc/default/locale
+          echo "Asia/Shanghai" > ${ROOTFS_DIR}/etc/timezone
+          ln -sf /usr/share/zoneinfo/Asia/Shanghai ${ROOTFS_DIR}/etc/localtime
 
-          # 中文语言包、中文字体、中文手册
-          apt install -y -qq \
+          # 中文语言包、中文字体、中文man手册
+          chroot ${ROOTFS_DIR} apt install -y -qq \
             language-pack-zh-hans language-pack-zh-hans-base \
             fonts-wqy-zenhei fonts-noto-cjk fonts-noto-cjk-extra \
             manpages-zh ttf-mscorefonts-installer
 
-          # 最全开发/运维/网络/磁盘/监控工具合集
-          apt install -y -qq \
+          # ====================== 3. 全量常用工具软件包 ======================
+          chroot ${ROOTFS_DIR} apt install -y -qq \
             build-essential gcc g++ make cmake pkg-config libssl-dev libc6-dev git git-lfs \
             openssh-server net-tools iproute2 iputils-ping dnsutils traceroute mtr iftop nload \
             tcpdump socat ncftp rsync wget curl axel aria2 nmap ipset iptables wireguard-tools \
@@ -123,46 +99,56 @@ jobs:
             sudo ca-certificates software-properties-common apt-transport-https gnupg2 \
             jq yq bc dos2unix uuid-runtime sysstat dmidecode hdparm util-linux
 
-          # OpenSSH 配置、开机自启、root密码登录（仅测试环境）
-          systemctl enable --now ssh
-          sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config
-          sed -i 's/#PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config
-          systemctl reload sshd
-          echo \"root:root\" | chpasswd
+          # ====================== 4. OpenSSH 配置（可root密码登录，测试用） ======================
+          sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' ${ROOTFS_DIR}/etc/ssh/sshd_config
+          sed -i 's/#PasswordAuthentication no/PasswordAuthentication yes/' ${ROOTFS_DIR}/etc/ssh/sshd_config
+          # 设置root密码 root
+          echo "root:root" | chroot ${ROOTFS_DIR} chpasswd
 
-          # OpenClaw 官方一键脚本安装
-          curl -fsSL https://openclaw.ai/install.sh | bash
+          # ====================== 5. OpenClaw 官方一键安装脚本 ======================
+          chroot ${ROOTFS_DIR} bash -c 'curl -fsSL https://openclaw.ai/install.sh | bash'
 
-          # 清理缓存减小体积
-          apt autoremove -y -qq
-          apt autoclean
-          apt clean
-          rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* /root/.cache/*
+          # ====================== 6. 清理缓存瘦身 ======================
+          chroot ${ROOTFS_DIR} apt autoremove -y -qq
+          chroot ${ROOTFS_DIR} apt autoclean
+          chroot ${ROOTFS_DIR} apt clean
+          rm -rf ${ROOTFS_DIR}/var/lib/apt/lists/* ${ROOTFS_DIR}/tmp/* ${ROOTFS_DIR}/var/tmp/* ${ROOTFS_DIR}/root/.cache/*
 
-          # 屏蔽 apt 警告
-          echo 'APT::Get::Quiet::Warning \"false\";' > /etc/apt/apt.conf.d/99quiet
-          CONFIG_EOF"
+          # 屏蔽apt CLI警告
+          echo 'APT::Get::Quiet::Warning "false";' > ${ROOTFS_DIR}/etc/apt/apt.conf.d/99quiet
 
-      # 5. 停止容器，导出纯 rootfs
-      - name: Stop container & export final rootfs tar.xz
+          # 退出unshare命名空间
+          exit
+          ROOTFS_CONFIG
+
+      # Step3: 卸载所有绑定挂载（防止打包文件损坏）
+      - name: Umount bind mounts safely
         run: |
-          sg lxd -c "lxc stop ${{ env.LXD_CT }}"
-          sleep 20
-          sg lxd -c "lxc export ${{ env.LXD_CT }} ./${{ env.OUTPUT_TAR }} --rootfs-only"
-          ls -lh ./${{ env.OUTPUT_TAR }}
+          sudo umount ${{ env.ROOTFS_DIR }}/sys || true
+          sudo umount ${{ env.ROOTFS_DIR }}/proc || true
+          sudo umount ${{ env.ROOTFS_DIR }}/dev/pts || true
+          sudo umount ${{ env.ROOTFS_DIR }}/dev || true
 
-      # 6. 强制清理所有资源，避免残留
-      - name: Cleanup LXD container/image and temp files
-        if: always()
+      # Step4: 打包最终rootfs为xz压缩包
+      - name: Compress final rootfs to tar.xz
         run: |
-          sg lxd -c "lxc delete -f ${{ env.LXD_CT }} || true"
-          sg lxd -c "lxc image delete ${{ env.LXD_IMG_ALIAS }} || true"
-          sudo rm -rf ${{ env.DEBOOT_ROOTFS }} raw-rootfs.tar lxd-import-bundle.tar metadata.yaml || true
+          cd ${{ env.ROOTFS_DIR }}
+          sudo tar -cJf ../${{ env.FINAL_ARCHIVE }} .
+          cd ..
+          ls -lh ${{ env.FINAL_ARCHIVE }}
 
-      # 7. 上传最终产物
-      - name: Upload rootfs artifact
+      # Step5: 上传产物到Action Artifact
+      - name: Upload built rootfs archive
         uses: actions/upload-artifact@v4
         with:
-          name: Ubuntu26.04-resolute-arm64-debootstrap-lxd-rootfs
-          path: ${{ env.OUTPUT_TAR }}
+          name: Ubuntu26.04-resolute-arm64-debootstrap-unshare-rootfs
+          path: ${{ env.FINAL_ARCHIVE }}
           retention-days: 90
+
+      # Step6: 清理临时目录
+      - name: Cleanup temp files
+        if: always()
+        run: |
+          sudo rm -rf ${{ env.ROOTFS_DIR }} || true
+
+

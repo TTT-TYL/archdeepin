@@ -25,7 +25,7 @@ jobs:
             --arch=amd64 \
             --include=ca-certificates,openssh-server,locales,tzdata,sudo,vim,curl,wget,git,iproute2,net-tools \
             resolute ./rootfs \
-            https://archive.ubuntu.com/ubuntu/
+            https://mirrors.huaweicloud.com/ubuntu/
         working-directory: ${{ github.workspace }}
 
       - name: 替换rootfs内apt华为云sources.list

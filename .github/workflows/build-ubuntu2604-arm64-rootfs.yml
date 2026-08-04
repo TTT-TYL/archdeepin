@@ -1,4 +1,4 @@
-name: Build Ubuntu 26.04 amd64 RootFS (Locked GNU coreutils Official Source)
+name: Build Ubuntu 26.04 amd64 RootFS (Locked GNU coreutils Azure Mirror)
 run-name: Build resolute amd64 rootfs fixed GNU coreutils
 
 on:
@@ -19,7 +19,7 @@ jobs:
         run: mkdir -p rootfs
         working-directory: ${{ github.workspace }}
 
-      - name: Bootstrap Ubuntu 26.04 amd64 official archive
+      - name: Bootstrap Ubuntu 26.04 amd64 azure源初始化
         run: |
           sudo debootstrap \
             --arch=amd64 \
@@ -28,13 +28,13 @@ jobs:
             http://azure.archive.ubuntu.com/ubuntu
         working-directory: ${{ github.workspace }}
 
-      - name: Inject official Ubuntu sources.list
+      - name: 写入Azure镜像完整sources.list
         run: |
           sudo tee ./rootfs/etc/apt/sources.list <<'EOF'
-          deb http://azure.archive.ubuntu.com/ubuntu resolute main restricted universe multiverse
-          deb http://azure.archive.ubuntu.com/ubuntu resolute-security main restricted universe multiverse
-          deb http://azure.archive.ubuntu.com/ubuntu resolute-updates main restricted universe multiverse
-          deb http://azure.archive.ubuntu.com/ubuntu resolute-backports main restricted universe multiverse
+          deb http://azure.archive.ubuntu.com/ubuntu/ resolute main restricted universe multiverse
+          deb http://azure.archive.ubuntu.com/ubuntu/ resolute-security main restricted universe multiverse
+          deb http://azure.archive.ubuntu.com/ubuntu/ resolute-updates main restricted universe multiverse
+          deb http://azure.archive.ubuntu.com/ubuntu/ resolute-backports main restricted universe multiverse
           EOF
         working-directory: ${{ github.workspace }}
 
@@ -46,32 +46,32 @@ jobs:
           sudo mount -t sysfs none ./rootfs/sys
         working-directory: ${{ github.workspace }}
 
-      - name: Chroot install GNU coreutils resolve conflict correctly
+      - name: Chroot 卸载默认uutils、重装锁定GNU coreutils
         run: |
           sudo chroot ./rootfs /bin/bash -e <<'SCRIPT'
           apt update
 
-          # 写入APT黑名单，后续禁止安装uutils版本
+          # 1. 彻底清除默认 coreutils-from-uutils
+          apt purge -y coreutils-from-uutils --allow-remove-essential
+          apt autoremove -y
+
+          # 2. 全新安装GNU版本coreutils
+          apt install -y coreutils-from-gnu coreutils --allow-remove-essential
+
+          # 3. APT黑名单永久拦截uutils分包
           cat > /etc/apt/preferences.d/block_uutils_coreutils <<APTPIN
           Package: coreutils-from-uutils
           Pin: release *
           Pin-Priority: -10
           APTPIN
 
-          # 第一步：临时解除锁定，允许APT卸载uutils分包
-          apt-mark unhold coreutils-from-uutils || true
-
-          # 安装GNU版本，APT自动卸载原uutils虚拟包，解决互斥冲突
-          apt install -y coreutils-from-gnu --allow-remove-essential
-
-          # 安装完毕重新上锁，杜绝后续被安装
           apt-mark hold coreutils-from-uutils
 
-          # 固定系统默认调用GNU coreutils
+          # 固定alternatives默认使用GNU coreutils
           update-alternatives --set coreutils /usr/bin/coreutils.gnu
           ln -sf /usr/bin/coreutils.gnu /usr/bin/coreutils
 
-          # 关闭APT推荐依赖，杜绝间接被装上uutils
+          # 关闭APT推荐依赖，防止间接装回uutils
           echo 'APT::AutoRemove::Recommends "false";' > /etc/apt/apt.conf.d/99-block-uutils
           echo 'APT::Install-Recommends "false";' >> /etc/apt/apt.conf.d/99-block-uutils
 
@@ -88,8 +88,7 @@ jobs:
           # root密码 123456
           echo "root:123456" | chpasswd
 
-          # 清理冗余缩小镜像体积
-          apt autoremove -y
+          # 清理缓存瘦身
           apt clean
           rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
           SCRIPT
@@ -111,7 +110,9 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ubuntu2604-amd64-official-rootfs
+          name: ubuntu2604-amd64-azure-rootfs
           path: ubuntu2604-amd64_gnu-coreutils_locked.tar.xz
           retention-days: 30
+
+
 

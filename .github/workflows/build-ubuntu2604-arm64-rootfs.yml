@@ -51,18 +51,21 @@ jobs:
           sudo chroot ./rootfs /bin/bash -e <<'SCRIPT'
           apt update
 
-          # 写入APT黑名单，彻底禁止后续安装uutils系列
+          # 写入APT黑名单，后续禁止安装uutils版本
           cat > /etc/apt/preferences.d/block_uutils_coreutils <<APTPIN
           Package: coreutils-from-uutils
           Pin: release *
           Pin-Priority: -10
           APTPIN
 
-          # 标记锁定，防止意外安装
-          apt-mark hold coreutils-from-uutils || true
+          # 第一步：临时解除锁定，允许APT卸载uutils分包
+          apt-mark unhold coreutils-from-uutils || true
 
-          # 关键：直接安装GNU版本，apt自动互斥替换掉当前uutils虚拟包
+          # 安装GNU版本，APT自动卸载原uutils虚拟包，解决互斥冲突
           apt install -y coreutils-from-gnu --allow-remove-essential
+
+          # 安装完毕重新上锁，杜绝后续被安装
+          apt-mark hold coreutils-from-uutils
 
           # 固定系统默认调用GNU coreutils
           update-alternatives --set coreutils /usr/bin/coreutils.gnu

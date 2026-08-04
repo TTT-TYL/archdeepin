@@ -46,45 +46,46 @@ jobs:
           sudo mount -t sysfs none ./rootfs/sys
         working-directory: ${{ github.workspace }}
 
-      - name: Chroot install GNU coreutils correctly resolve conflict
+      - name: Chroot install GNU coreutils resolve conflict correctly
         run: |
           sudo chroot ./rootfs /bin/bash -e <<'SCRIPT'
           apt update
 
-          # 1. 写入APT屏蔽规则，永久阻止uutils被安装
+          # 写入APT黑名单，彻底禁止后续安装uutils系列
           cat > /etc/apt/preferences.d/block_uutils_coreutils <<APTPIN
-          Package: uutils-coreutils rust-coreutils coreutils-from-uutils
+          Package: coreutils-from-uutils
           Pin: release *
           Pin-Priority: -10
           APTPIN
 
-          apt-mark hold uutils-coreutils rust-coreutils coreutils-from-uutils || true
+          # 标记锁定，防止意外安装
+          apt-mark hold coreutils-from-uutils || true
 
-          # 关键修复：一步切换二选一虚拟包，解决conflict冲突
-          apt install -y coreutils-from-gnu --swap coreutils-from-uutils --allow-remove-essential
+          # 关键：直接安装GNU版本，apt自动互斥替换掉当前uutils虚拟包
+          apt install -y coreutils-from-gnu --allow-remove-essential
 
-          # 锁定默认软链接与alternatives
+          # 固定系统默认调用GNU coreutils
           update-alternatives --set coreutils /usr/bin/coreutils.gnu
           ln -sf /usr/bin/coreutils.gnu /usr/bin/coreutils
 
-          # 关闭APT自动安装推荐依赖，防止误装uutils
+          # 关闭APT推荐依赖，杜绝间接被装上uutils
           echo 'APT::AutoRemove::Recommends "false";' > /etc/apt/apt.conf.d/99-block-uutils
           echo 'APT::Install-Recommends "false";' >> /etc/apt/apt.conf.d/99-block-uutils
 
-          # 中文本地化配置
+          # 中文本地化
           locale-gen zh_CN.UTF-8
           echo "LANG=zh_CN.UTF-8" > /etc/default/locale
           echo "LC_ALL=zh_CN.UTF-8" >> /etc/default/locale
           update-locale LANG=zh_CN.UTF-8 LC_ALL=zh_CN.UTF-8
 
-          # SSH配置放行root密码登录
+          # SSH允许root密码登录
           sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config
           systemctl enable ssh
 
-          # 设置root密码
+          # root密码 123456
           echo "root:123456" | chpasswd
 
-          # 清理缓存瘦身镜像
+          # 清理冗余缩小镜像体积
           apt autoremove -y
           apt clean
           rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
@@ -110,13 +111,4 @@ jobs:
           name: ubuntu2604-amd64-official-rootfs
           path: ubuntu2604-amd64_gnu-coreutils_locked.tar.xz
           retention-days: 30
-
-
-
-
-
-
-
-
-
 

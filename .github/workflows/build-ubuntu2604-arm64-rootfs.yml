@@ -25,16 +25,16 @@ jobs:
             --arch=amd64 \
             --include=ca-certificates,openssh-server,locales,tzdata,sudo,vim,curl,wget,git,iproute2,net-tools \
             resolute ./rootfs \
-            https://archive.ubuntu.com/ubuntu/
+            http://azure.archive.ubuntu.com/ubuntu
         working-directory: ${{ github.workspace }}
 
       - name: Inject official Ubuntu sources.list
         run: |
           sudo tee ./rootfs/etc/apt/sources.list <<'EOF'
-          deb https://archive.ubuntu.com/ubuntu/ resolute main restricted universe multiverse
-          deb https://archive.ubuntu.com/ubuntu/ resolute-security main restricted universe multiverse
-          deb https://archive.ubuntu.com/ubuntu/ resolute-updates main restricted universe multiverse
-          deb https://archive.ubuntu.com/ubuntu/ resolute-backports main restricted universe multiverse
+          deb http://azure.archive.ubuntu.com/ubuntu resolute main restricted universe multiverse
+          deb http://azure.archive.ubuntu.com/ubuntu resolute-security main restricted universe multiverse
+          deb http://azure.archive.ubuntu.com/ubuntu resolute-updates main restricted universe multiverse
+          deb http://azure.archive.ubuntu.com/ubuntu resolute-backports main restricted universe multiverse
           EOF
         working-directory: ${{ github.workspace }}
 

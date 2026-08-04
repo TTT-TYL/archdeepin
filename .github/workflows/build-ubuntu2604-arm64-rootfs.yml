@@ -1,155 +1,110 @@
-name: Debootstrap + Unshare Chroot Build Ubuntu26.04 ARM64 RootFS
-run-name: resolute arm64 rootfs | Huawei source | Chinese | OpenClaw | SSH
+name: Build Ubuntu 26.04 amd64 RootFS (GNU coreutils locked)
 
 on:
-  push:
-    branches: [main, master]
   workflow_dispatch:
-
-env:
-  CODENAME: resolute
-  TARGET_ARCH: arm64
-  ROOTFS_DIR: ./ubuntu-resolute-arm64-rootfs
-  FINAL_ARCHIVE: ubuntu-26.04-resolute-arm64-custom-rootfs.tar.xz
+  push:
+    branches: [ main ]
 
 jobs:
-  build-rootfs:
+  build_rootfs:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout empty workspace
-        uses: actions/checkout@v4
-
-      - name: Install build dependencies
+      - name: Install debootstrap dependencies
         run: |
-          sudo apt update -qq
-          sudo apt install -y -qq \
-            debootstrap qemu-user-static binfmt-support \
-            xz-utils tar coreutils curl wget ca-certificates util-linux
-          # 启用arm64跨架构二进制模拟
-          sudo update-binfmts --enable qemu-aarch64
+          sudo apt update
+          sudo apt install -y debootstrap qemu-user-static binfmt-support xz-utils
 
-      # Step1: debootstrap 官方源拉取基础arm64 rootfs（构建源强制官方archive）
-      - name: Stage1 Debootstrap official source base rootfs
+      - name: Create rootfs workspace
+        run: mkdir -p ./rootfs_out
+        working-directory: ${{ github.workspace }}
+
+      - name: Bootstrap Ubuntu 26.04 amd64 (Huawei mirror)
         run: |
-          sudo rm -rf ${{ env.ROOTFS_DIR }}
-          sudo mkdir -p ${{ env.ROOTFS_DIR }}
+          sudo debootstrap --arch=amd64 \
+            --include=apt-transport-https,ca-certificates,openssh-server,locales,tzdata,sudo,iproute2,net-tools,vim,git,wget,curl \
+            resolute ./rootfs_out https://mirrors.huaweicloud.com/ubuntu/
+        working-directory: ${{ github.workspace }}
 
-          # --foreign 跨架构一阶引导，源为Ubuntu官方
-          sudo debootstrap \
-            --arch=${{ env.TARGET_ARCH }} \
-            --foreign \
-            ${{ env.CODENAME }} \
-            ${{ env.ROOTFS_DIR }} \
-            http://archive.ubuntu.com/ubuntu/
-
-          # 注入qemu静态二进制用于chroot执行arm64程序
-          sudo cp /usr/bin/qemu-aarch64-static ${{ env.ROOTFS_DIR }}/usr/bin/
-
-          # 二阶完成debootstrap基础安装
-          sudo chroot ${{ env.ROOTFS_DIR }} /bin/bash -c "/debootstrap/debootstrap --second-stage"
-
-      # Step2: 准备挂载点，unshare 创建隔离命名空间后进入chroot配置
-      - name: Stage2 Unshare + Chroot full system configure
+      - name: Configure Huawei APT source inside rootfs
         run: |
-          # 绑定必要虚拟文件系统
-          sudo mount --bind /dev ${{ env.ROOTFS_DIR }}/dev
-          sudo mount --bind /dev/pts ${{ env.ROOTFS_DIR }}/dev/pts
-          sudo mount --bind /proc ${{ env.ROOTFS_DIR }}/proc
-          sudo mount --bind /sys ${{ env.ROOTFS_DIR }}/sys
+          sudo tee ./rootfs_out/etc/apt/sources.list <<'EOF'
+          deb https://mirrors.huaweicloud.com/ubuntu/ resolute main restricted universe multiverse
+          deb https://mirrors.huaweicloud.com/ubuntu/ resolute-security main restricted universe multiverse
+          deb https://mirrors.huaweicloud.com/ubuntu/ resolute-updates main restricted universe multiverse
+          EOF
+        working-directory: ${{ github.workspace }}
 
-          # 使用unshare隔离PID、挂载命名空间，再执行chroot内部配置脚本
-          sudo unshare --pid --mount --fork bash <<'ROOTFS_CONFIG'
-          set -euo pipefail
-          export CODENAME=resolute
-          export ROOTFS_DIR=./ubuntu-resolute-arm64-rootfs
-
-          # ====================== 1. 替换内部APT源为华为云 ======================
-          cat > ${ROOTFS_DIR}/etc/apt/sources.list <<LIST
-          deb https://mirrors.huaweicloud.com/ubuntu/ ${CODENAME} main restricted universe multiverse
-          deb https://mirrors.huaweicloud.com/ubuntu/ ${CODENAME}-security main restricted universe multiverse
-          deb https://mirrors.huaweicloud.com/ubuntu/ ${CODENAME}-updates main restricted universe multiverse
-          deb https://mirrors.huaweicloud.com/ubuntu/ ${CODENAME}-backports main restricted universe multiverse
-          LIST
-
-          # 仅update，严格禁止 apt full-upgrade
-          chroot ${ROOTFS_DIR} apt update -qq
-
-          # ====================== 2. 完整中文本地化环境 ======================
-          chroot ${ROOTFS_DIR} locale-gen zh_CN.UTF-8
-          chroot ${ROOTFS_DIR} update-locale LANG=zh_CN.UTF-8 LC_ALL=zh_CN.UTF-8 LC_MESSAGES=zh_CN.UTF-8
-          echo 'LANG=zh_CN.UTF-8' > ${ROOTFS_DIR}/etc/default/locale
-          echo 'LC_ALL=zh_CN.UTF-8' >> ${ROOTFS_DIR}/etc/default/locale
-          echo "Asia/Shanghai" > ${ROOTFS_DIR}/etc/timezone
-          ln -sf /usr/share/zoneinfo/Asia/Shanghai ${ROOTFS_DIR}/etc/localtime
-
-          # 中文语言包、中文字体、中文man手册
-          chroot ${ROOTFS_DIR} apt install -y -qq \
-            language-pack-zh-hans language-pack-zh-hans-base \
-            fonts-wqy-zenhei fonts-noto-cjk fonts-noto-cjk-extra \
-            manpages-zh ttf-mscorefonts-installer
-
-          # ====================== 3. 【已修复】常用工具软件包列表 ======================
-          chroot ${ROOTFS_DIR} apt install -y -qq \
-            build-essential gcc g++ make cmake pkg-config libssl-dev libc6-dev git git-lfs \
-            openssh-server net-tools iproute2 iputils-ping dnsutils traceroute mtr iftop nload \
-            tcpdump socat ncftp rsync wget curl axel aria2 nmap ipset iptables wireguard-tools \
-            fdisk parted e2fsprogs dosfstools ntfs-3g squashfs-tools \
-            htop atop iotop bmon tree vim nano less cron logrotate lsof psmisc screen tmux \
-            zip unzip unrar p7zip-full gzip bzip2 xz-utils zstd pigz \
-            sudo ca-certificates software-properties-common apt-transport-https gnupg2 \
-            jq yq bc dos2unix uuid-runtime sysstat dmidecode hdparm util-linux
-
-          # ====================== 4. OpenSSH 配置（可root密码登录，测试用） ======================
-          sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' ${ROOTFS_DIR}/etc/ssh/sshd_config
-          sed -i 's/#PasswordAuthentication no/PasswordAuthentication yes/' ${ROOTFS_DIR}/etc/ssh/sshd_config
-          # 设置root密码 root
-          echo "root:root" | chroot ${ROOTFS_DIR} chpasswd
-
-          # ====================== 5. OpenClaw 官方一键安装脚本 ======================
-          chroot ${ROOTFS_DIR} bash -c 'curl -fsSL https://openclaw.ai/install.sh | bash'
-
-          # ====================== 6. 清理缓存瘦身 ======================
-          chroot ${ROOTFS_DIR} apt autoremove -y -qq
-          chroot ${ROOTFS_DIR} apt autoclean
-          chroot ${ROOTFS_DIR} apt clean
-          rm -rf ${ROOTFS_DIR}/var/lib/apt/lists/* ${ROOTFS_DIR}/tmp/* ${ROOTFS_DIR}/var/tmp/* ${ROOTFS_DIR}/root/.cache/*
-
-          # 屏蔽apt CLI警告
-          echo 'APT::Get::Quiet::Warning "false";' > ${ROOTFS_DIR}/etc/apt/apt.conf.d/99quiet
-
-          # 退出unshare命名空间
-          exit
-          ROOTFS_CONFIG
-
-      # Step3: 卸载所有绑定挂载（防止打包文件损坏）
-      - name: Umount bind mounts safely
+      - name: Mount virtual fs for chroot
         run: |
-          sudo umount ${{ env.ROOTFS_DIR }}/sys || true
-          sudo umount ${{ env.ROOTFS_DIR }}/proc || true
-          sudo umount ${{ env.ROOTFS_DIR }}/dev/pts || true
-          sudo umount ${{ env.ROOTFS_DIR }}/dev || true
+          sudo mount --bind /dev ./rootfs_out/dev
+          sudo mount --bind /dev/pts ./rootfs_out/dev/pts
+          sudo mount -t proc none ./rootfs_out/proc
+          sudo mount -t sysfs none ./rootfs_out/sys
+        working-directory: ${{ github.workspace }}
 
-      # Step4: 打包最终rootfs为xz压缩包
-      - name: Compress final rootfs to tar.xz
+      - name: Chroot configure coreutils lock & switch GNU coreutils
         run: |
-          cd ${{ env.ROOTFS_DIR }}
-          sudo tar -cJf ../${{ env.FINAL_ARCHIVE }} .
-          cd ..
-          ls -lh ${{ env.FINAL_ARCHIVE }}
+          sudo chroot ./rootfs_out /bin/bash -c "
+          set -e
+          apt update
+          # 1. 强制锁定 uutils-coreutils 相关包，禁止安装/升级
+          cat > /etc/apt/preferences.d/block_uutils_coreutils <<APTPIN
+          Package: uutils-coreutils rust-coreutils coreutils-from-uutils
+          Pin: release a=*
+          Pin-Priority: -10
+          APTPIN
 
-      # Step5: 上传产物到Action Artifact
-      - name: Upload built rootfs archive
+          # 标记这些包为禁止安装
+          apt-mark hold uutils-coreutils rust-coreutils coreutils-from-uutils || true
+
+          # 卸载已预装的uutils版本
+          apt remove -y uutils-coreutils rust-coreutils coreutils-from-uutils --allow-remove-essential || true
+
+          # 安装官方GNU coreutils
+          apt install -y coreutils-from-gnu --allow-remove-essential
+
+          # 设置系统默认使用GNU coreutils
+          update-alternatives --set coreutils /usr/bin/coreutils.gnu
+          # 固化软链接兜底
+          ln -sf /usr/bin/coreutils.gnu /usr/bin/coreutils
+
+          # 中文本地化配置
+          locale-gen zh_CN.UTF-8
+          echo 'LANG=zh_CN.UTF-8' > /etc/default/locale
+          echo 'LC_ALL=zh_CN.UTF-8' >> /etc/default/locale
+
+          # SSH基础配置
+          sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config
+          echo 'root:123456' | chpasswd
+
+          # 清理缓存减小体积
+          apt autoremove -y
+          apt clean
+          rm -rf /var/lib/apt/lists/*
+          "
+        working-directory: ${{ github.workspace }}
+
+      - name: Unmount virtual filesystems safely
+        run: |
+          sudo umount ./rootfs_out/sys
+          sudo umount ./rootfs_out/proc
+          sudo umount ./rootfs_out/dev/pts
+          sudo umount ./rootfs_out/dev
+        working-directory: ${{ github.workspace }}
+
+      - name: Pack rootfs to tar.xz
+        run: |
+          sudo tar -cJf ubuntu2604-amd64-gnu-coreutils.tar.xz -C ./rootfs_out .
+        working-directory: ${{ github.workspace }}
+
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Ubuntu26.04-resolute-arm64-debootstrap-unshare-rootfs
-          path: ${{ env.FINAL_ARCHIVE }}
-          retention-days: 90
+          name: ubuntu2604-amd64-rootfs
+          path: ubuntu2604-amd64-gnu-coreutils.tar.xz
+          retention-days: 30
 
-      # Step6: 清理临时目录
-      - name: Cleanup temp files
-        if: always()
-        run: |
-          sudo rm -rf ${{ env.ROOTFS_DIR }} || true
+
 
 
 

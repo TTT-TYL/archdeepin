@@ -1,5 +1,5 @@
-name: Build Ubuntu 26.04 amd64 RootFS (Locked GNU coreutils)
-run-name: Build resolute amd64 rootfs with fixed GNU coreutils
+name: Build Ubuntu 26.04 amd64 RootFS (Locked GNU coreutils Official Source)
+run-name: Build resolute amd64 rootfs fixed GNU coreutils
 
 on:
   workflow_dispatch:
@@ -10,35 +10,35 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: Install build dependencies
+      - name: Install build host dependencies
         run: |
           sudo apt update -y
           sudo apt install -y debootstrap qemu-user-static binfmt-support xz-utils
 
-      - name: Prepare workspace
+      - name: Prepare workspace dir
         run: mkdir -p rootfs
         working-directory: ${{ github.workspace }}
 
-      - name: Bootstrap Ubuntu 26.04 amd64 华为云源初始化
+      - name: Bootstrap Ubuntu 26.04 amd64 official archive
         run: |
           sudo debootstrap \
             --arch=amd64 \
             --include=ca-certificates,openssh-server,locales,tzdata,sudo,vim,curl,wget,git,iproute2,net-tools \
             resolute ./rootfs \
-            https://mirrors.huaweicloud.com/ubuntu/
+            https://archive.ubuntu.com/ubuntu/
         working-directory: ${{ github.workspace }}
 
-      - name: 替换rootfs内apt华为云sources.list
+      - name: Inject official Ubuntu sources.list
         run: |
           sudo tee ./rootfs/etc/apt/sources.list <<'EOF'
-          deb https://mirrors.huaweicloud.com/ubuntu/ resolute main restricted universe multiverse
-          deb https://mirrors.huaweicloud.com/ubuntu/ resolute-security main restricted universe multiverse
-          deb https://mirrors.huaweicloud.com/ubuntu/ resolute-updates main restricted universe multiverse
-          deb https://mirrors.huaweicloud.com/ubuntu/ resolute-backports main restricted universe multiverse
+          deb https://archive.ubuntu.com/ubuntu/ resolute main restricted universe multiverse
+          deb https://archive.ubuntu.com/ubuntu/ resolute-security main restricted universe multiverse
+          deb https://archive.ubuntu.com/ubuntu/ resolute-updates main restricted universe multiverse
+          deb https://archive.ubuntu.com/ubuntu/ resolute-backports main restricted universe multiverse
           EOF
         working-directory: ${{ github.workspace }}
 
-      - name: 挂载chroot所需虚拟文件系统
+      - name: Bind mount virtual filesystems for chroot
         run: |
           sudo mount --bind /dev ./rootfs/dev
           sudo mount --bind /dev/pts ./rootfs/dev/pts
@@ -46,34 +46,30 @@ jobs:
           sudo mount -t sysfs none ./rootfs/sys
         working-directory: ${{ github.workspace }}
 
-      - name: Chroot内部配置核心：锁定GNU coreutils、封禁uutils
+      - name: Chroot install GNU coreutils correctly resolve conflict
         run: |
           sudo chroot ./rootfs /bin/bash -e <<'SCRIPT'
           apt update
 
-          # 1. APT优先级封禁uutils系列包，优先级-10，绝对不会被安装/升级
+          # 1. 写入APT屏蔽规则，永久阻止uutils被安装
           cat > /etc/apt/preferences.d/block_uutils_coreutils <<APTPIN
           Package: uutils-coreutils rust-coreutils coreutils-from-uutils
           Pin: release *
           Pin-Priority: -10
           APTPIN
 
-          # 锁定标记，apt-mark hold 锁住这几个包，upgrade/dist-upgrade不会自动拉取
           apt-mark hold uutils-coreutils rust-coreutils coreutils-from-uutils || true
 
-          # 卸载系统默认预装的uutils相关组件
-          apt remove -y uutils-coreutils rust-coreutils coreutils-from-uutils --allow-remove-essential || true
+          # 关键修复：一步切换二选一虚拟包，解决conflict冲突
+          apt install -y coreutils-from-gnu --swap coreutils-from-uutils --allow-remove-essential
 
-          # 安装官方GNU coreutils主包
-          apt install -y coreutils-from-gnu --allow-remove-essential
-
-          # 系统默认切换至GNU coreutils
+          # 锁定默认软链接与alternatives
           update-alternatives --set coreutils /usr/bin/coreutils.gnu
           ln -sf /usr/bin/coreutils.gnu /usr/bin/coreutils
 
-          # 额外兜底：屏蔽apt自动安装uutils的触发机制
-          echo "APT::AutoRemove::Recommends "false";" >> /etc/apt/apt.conf.d/99-block-uutils
-          echo "APT::Install-Recommends "false";" >> /etc/apt/apt.conf.d/99-block-uutils
+          # 关闭APT自动安装推荐依赖，防止误装uutils
+          echo 'APT::AutoRemove::Recommends "false";' > /etc/apt/apt.conf.d/99-block-uutils
+          echo 'APT::Install-Recommends "false";' >> /etc/apt/apt.conf.d/99-block-uutils
 
           # 中文本地化配置
           locale-gen zh_CN.UTF-8
@@ -81,21 +77,21 @@ jobs:
           echo "LC_ALL=zh_CN.UTF-8" >> /etc/default/locale
           update-locale LANG=zh_CN.UTF-8 LC_ALL=zh_CN.UTF-8
 
-          # SSH配置：允许root密码登录
+          # SSH配置放行root密码登录
           sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config
           systemctl enable ssh
 
-          # 设置root密码 123456
+          # 设置root密码
           echo "root:123456" | chpasswd
 
-          # 清理缓存瘦身
+          # 清理缓存瘦身镜像
           apt autoremove -y
           apt clean
           rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
           SCRIPT
         working-directory: ${{ github.workspace }}
 
-      - name: 安全卸载挂载目录（必须顺序卸载）
+      - name: Safe unmount all bind mounts
         run: |
           sudo umount ./rootfs/sys
           sudo umount ./rootfs/proc
@@ -103,17 +99,19 @@ jobs:
           sudo umount ./rootfs/dev
         working-directory: ${{ github.workspace }}
 
-      - name: 打包为 tar.xz 高压缩格式
+      - name: Pack rootfs into tar.xz
         run: |
           sudo tar -cJf ubuntu2604-amd64_gnu-coreutils_locked.tar.xz -C ./rootfs .
         working-directory: ${{ github.workspace }}
 
-      - name: 上传制品至Action存档
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ubuntu2604-amd64-rootfs
+          name: ubuntu2604-amd64-official-rootfs
           path: ubuntu2604-amd64_gnu-coreutils_locked.tar.xz
           retention-days: 30
+
+
 
 
 

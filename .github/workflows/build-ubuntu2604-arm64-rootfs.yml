@@ -23,7 +23,7 @@ jobs:
         run: |
           sudo debootstrap \
             --arch=amd64 \
-            --include=apt-transport-https,ca-certificates,openssh-server,locales,tzdata,sudo,vim,curl,wget,git,iproute2,net-tools \
+            --include=ca-certificates,openssh-server,locales,tzdata,sudo,vim,curl,wget,git,iproute2,net-tools \
             resolute ./rootfs \
             https://archive.ubuntu.com/ubuntu/
         working-directory: ${{ github.workspace }}

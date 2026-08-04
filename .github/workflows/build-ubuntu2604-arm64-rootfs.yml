@@ -1,5 +1,5 @@
-name: Build Ubuntu 26.04 amd64 RootFS (Locked GNU coreutils Azure Mirror)
-run-name: Build resolute amd64 rootfs fixed GNU coreutils
+name: Build Ubuntu 26.04 amd64 RootFS (GNU coreutils + Azure Mirror)
+run-name: Build resolute amd64 rootfs
 
 on:
   workflow_dispatch:
@@ -10,16 +10,16 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: Install build host dependencies
+      - name: Install host build dependencies
         run: |
           sudo apt update -y
           sudo apt install -y debootstrap qemu-user-static binfmt-support xz-utils
 
-      - name: Prepare workspace dir
+      - name: Create workspace directory
         run: mkdir -p rootfs
         working-directory: ${{ github.workspace }}
 
-      - name: Bootstrap Ubuntu 26.04 amd64 azure源初始化
+      - name: Bootstrap with azure.archive.ubuntu.com
         run: |
           sudo debootstrap \
             --arch=amd64 \
@@ -28,7 +28,7 @@ jobs:
             http://azure.archive.ubuntu.com/ubuntu
         working-directory: ${{ github.workspace }}
 
-      - name: 写入Azure镜像完整sources.list
+      - name: Write full Azure apt sources.list
         run: |
           sudo tee ./rootfs/etc/apt/sources.list <<'EOF'
           deb http://azure.archive.ubuntu.com/ubuntu/ resolute main restricted universe multiverse
@@ -38,7 +38,7 @@ jobs:
           EOF
         working-directory: ${{ github.workspace }}
 
-      - name: Bind mount virtual filesystems for chroot
+      - name: Bind mount virtual filesystems
         run: |
           sudo mount --bind /dev ./rootfs/dev
           sudo mount --bind /dev/pts ./rootfs/dev/pts
@@ -46,32 +46,26 @@ jobs:
           sudo mount -t sysfs none ./rootfs/sys
         working-directory: ${{ github.workspace }}
 
-      - name: Chroot 卸载默认uutils、重装锁定GNU coreutils
+      - name: Chroot setup GNU coreutils & environment
         run: |
           sudo chroot ./rootfs /bin/bash -e <<'SCRIPT'
           apt update
 
-          # 1. 彻底清除默认 coreutils-from-uutils
-          apt purge -y coreutils-from-uutils --allow-remove-essential
-          apt autoremove -y
-
-          # 2. 全新安装GNU版本coreutils
-          apt install -y coreutils-from-gnu coreutils --allow-remove-essential
-
-          # 3. APT黑名单永久拦截uutils分包
+          # 第一步：预先写入拦截规则，永远拒绝安装uutils版coreutils
           cat > /etc/apt/preferences.d/block_uutils_coreutils <<APTPIN
           Package: coreutils-from-uutils
           Pin: release *
           Pin-Priority: -10
           APTPIN
 
-          apt-mark hold coreutils-from-uutils
+          # 直接安装GNU版本虚拟包，系统自动绑定GNU coreutils
+          apt install -y coreutils-from-gnu coreutils --allow-remove-essential
 
-          # 固定alternatives默认使用GNU coreutils
+          # 切换系统默认alternatives指向GNU
           update-alternatives --set coreutils /usr/bin/coreutils.gnu
           ln -sf /usr/bin/coreutils.gnu /usr/bin/coreutils
 
-          # 关闭APT推荐依赖，防止间接装回uutils
+          # 关闭APT推荐依赖，防止间接拉入uutils相关包
           echo 'APT::AutoRemove::Recommends "false";' > /etc/apt/apt.conf.d/99-block-uutils
           echo 'APT::Install-Recommends "false";' >> /etc/apt/apt.conf.d/99-block-uutils
 
@@ -81,20 +75,20 @@ jobs:
           echo "LC_ALL=zh_CN.UTF-8" >> /etc/default/locale
           update-locale LANG=zh_CN.UTF-8 LC_ALL=zh_CN.UTF-8
 
-          # SSH允许root密码登录
+          # SSH配置允许root密码登录
           sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config
           systemctl enable ssh
 
           # root密码 123456
           echo "root:123456" | chpasswd
 
-          # 清理缓存瘦身
+          # 清理缓存压缩体积
           apt clean
           rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
           SCRIPT
         working-directory: ${{ github.workspace }}
 
-      - name: Safe unmount all bind mounts
+      - name: Safely unmount all bind mounts
         run: |
           sudo umount ./rootfs/sys
           sudo umount ./rootfs/proc
@@ -102,17 +96,14 @@ jobs:
           sudo umount ./rootfs/dev
         working-directory: ${{ github.workspace }}
 
-      - name: Pack rootfs into tar.xz
+      - name: Package rootfs to tar.xz
         run: |
-          sudo tar -cJf ubuntu2604-amd64_gnu-coreutils_locked.tar.xz -C ./rootfs .
+          sudo tar -cJf ubuntu2604-amd64_gnu-coreutils_azure.tar.xz -C ./rootfs .
         working-directory: ${{ github.workspace }}
 
-      - name: Upload artifact
+      - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ubuntu2604-amd64-azure-rootfs
-          path: ubuntu2604-amd64_gnu-coreutils_locked.tar.xz
+          name: ubuntu2604-amd64-azure-gnu-coreutils
+          path: ubuntu2604-amd64_gnu-coreutils_azure.tar.xz
           retention-days: 30
-
-
-

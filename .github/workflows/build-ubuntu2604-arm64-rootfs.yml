@@ -23,8 +23,9 @@ jobs:
         run: |
           sudo debootstrap \
             --arch=amd64 \
-            --include=ca-certificates,openssh-server,locales,tzdata,sudo,vim,curl,wget,git,iproute2,net-tools,passwd,shadow-utils,libpam-modules,libpam-runtime,login
-            resolute ./rootfs \
+            --include=ca-certificates,openssh-server,locales,tzdata,sudo,vim,curl,wget,git,iproute2,net-tools,passwd,shadow-utils,libpam-modules,libpam-runtime,login \
+            resolute \
+            ./rootfs \
             http://azure.archive.ubuntu.com/ubuntu
         working-directory: ${{ github.workspace }}
 
@@ -55,7 +56,7 @@ jobs:
           echo 'APT::Install-Recommends "false";' > /etc/apt/apt.conf.d/99-no-recommends
           echo 'APT::AutoRemove::Recommends "false";' >> /etc/apt/apt.conf.d/99-no-recommends
 
-          # 重装账号认证整套核心组件，替换shadow为shadow-utils
+          # 重装账号认证整套核心组件
           apt install --reinstall -y sudo passwd shadow-utils libpam-modules libpam-runtime login --allow-remove-essential
 
           ###########################
@@ -72,7 +73,7 @@ jobs:
           # 重新生成PAM认证配置
           pam-auth-update --force
 
-          # 修复关键文件权限（chroot打包后极易权限错乱，是认证失败头号原因）
+          # 修复关键文件权限
           chmod 4755 /usr/bin/sudo
           chmod 4755 /bin/su
           chmod 600 /etc/shadow
@@ -82,7 +83,6 @@ jobs:
 
           # sudo权限放行root完整权限
           echo "root ALL=(ALL:ALL) ALL" >> /etc/sudoers
-          # 校验sudoers语法合法性
           visudo -c || true
 
           # 中文完整本地化
@@ -120,6 +120,4 @@ jobs:
           name: ubuntu2604-amd64-native-rootfs
           path: ubuntu2604-resolute-amd64-native-rootfs.tar.xz
           retention-days: 30
-
-
 

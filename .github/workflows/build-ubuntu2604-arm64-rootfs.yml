@@ -1,5 +1,5 @@
-name: Build Ubuntu26.04 amd64 RootFS | Fix Sudo/Su Auth Lock
-run-name: Build resolute amd64 azure rootfs fix account lock
+name: Build Ubuntu26.04 amd64 RootFS Native Coreutils Fix Auth
+run-name: Ubuntu26.04 amd64 原生coreutils 修复账号锁定su/sudo认证
 
 on:
   workflow_dispatch:
@@ -10,25 +10,25 @@ jobs:
   build_rootfs:
     runs-on: ubuntu-latest
     steps:
-      - name: Install host dependent packages
+      - name: 安装宿主机构建依赖
         run: |
           sudo apt update -y
           sudo apt install -y debootstrap qemu-user-static binfmt-support xz-utils
 
-      - name: Prepare workspace dir
+      - name: 初始化工作目录
         run: mkdir -p ./rootfs
         working-directory: ${{ github.workspace }}
 
-      - name: Bootstrap Ubuntu 26.04 resolute with Azure mirror
+      - name: debootstrap 拉取 Ubuntu 26.04 resolute amd64（华为云源）
         run: |
           sudo debootstrap \
             --arch=amd64 \
-            --include=ca-certificates,openssh-server,locales,tzdata,sudo,vim,curl,wget,git,iproute2,net-tools,passwd,shadow,libpam-modules,libpam-runtime \
+            --include=ca-certificates,openssh-server,locales,tzdata,sudo,vim,curl,wget,git,iproute2,net-tools,passwd,shadow-utils,libpam-modules,libpam-runtime,login
             resolute ./rootfs \
             http://azure.archive.ubuntu.com/ubuntu
         working-directory: ${{ github.workspace }}
 
-      - name: Replace apt sources.list full Azure mirror
+      - name: 替换全局APT华为云源
         run: |
           sudo tee ./rootfs/etc/apt/sources.list <<'EOF'
           deb http://azure.archive.ubuntu.com/ubuntu/ resolute main restricted universe multiverse
@@ -38,7 +38,7 @@ jobs:
           EOF
         working-directory: ${{ github.workspace }}
 
-      - name: Bind mount virtual fs for chroot
+      - name: 挂载chroot所需虚拟文件系统
         run: |
           sudo mount --bind /dev ./rootfs/dev
           sudo mount --bind /dev/pts ./rootfs/dev/pts
@@ -46,33 +46,33 @@ jobs:
           sudo mount -t sysfs none ./rootfs/sys
         working-directory: ${{ github.workspace }}
 
-      - name: Chroot deploy system & fix account lock/sudo auth issue
+      - name: Chroot内系统配置 + 针对性修复账号锁定、su、sudo认证失败
         run: |
           sudo chroot ./rootfs /bin/bash -e <<'INNER_SCRIPT'
           apt update -y
 
-          # 1. APT屏蔽uutils coreutils，防止后续自动替换
-          cat > /etc/apt/preferences.d/block_uutils_coreutils <<APTPIN
-          Package: coreutils-from-uutils
-          Pin: release *
-          Pin-Priority: -10
-          APTPIN
+          # 优化APT配置，不安装多余推荐包，无coreutils相关操作
           echo 'APT::Install-Recommends "false";' > /etc/apt/apt.conf.d/99-no-recommends
           echo 'APT::AutoRemove::Recommends "false";' >> /etc/apt/apt.conf.d/99-no-recommends
 
-          # 2. 重装账号体系全套关键包，修复PAM、shadow、sudo损坏
-          apt install --reinstall -y sudo passwd shadow libpam-modules libpam-runtime login --allow-remove-essential
+          # 重装账号认证整套核心组件，替换shadow为shadow-utils
+          apt install --reinstall -y sudo passwd shadow-utils libpam-modules libpam-runtime login --allow-remove-essential
 
-          # =====================核心修复：解决账号锁定、su/sudo认证失败=====================
-          # 重置root密码
+          ###########################
+          # 核心修复区块
+          # 解决：sudo: Account validation failure, is your account locked?
+          # 解决：su: Authentication failure
+          ###########################
+          # 设置root固定密码123456
           echo "root:123456" | chpasswd
-          # 解锁root账户（关键，解决Account locked）
+          # 解锁root用户
           passwd -u root
-          # 清除账号失败锁定计数
+          # 清空密码输错导致的登录锁定计数
           faillock --reset --user root || true
-          # 重新生成PAM配置文件
+          # 重新生成PAM认证配置
           pam-auth-update --force
-          # 修复关键文件权限（权限错乱是认证失败高频诱因）
+
+          # 修复关键文件权限（chroot打包后极易权限错乱，是认证失败头号原因）
           chmod 4755 /usr/bin/sudo
           chmod 4755 /bin/su
           chmod 600 /etc/shadow
@@ -80,28 +80,28 @@ jobs:
           chmod 640 /etc/group
           chown root:root /etc/shadow /etc/passwd /etc/group
 
-          # 配置sudo允许root直接使用，放行免异常校验
+          # sudo权限放行root完整权限
           echo "root ALL=(ALL:ALL) ALL" >> /etc/sudoers
-          # 加固sudoers语法安全
+          # 校验sudoers语法合法性
           visudo -c || true
 
-          # 3. 中文本地化部署
+          # 中文完整本地化
           locale-gen zh_CN.UTF-8
           echo "LANG=zh_CN.UTF-8" > /etc/default/locale
           echo "LC_ALL=zh_CN.UTF-8" >> /etc/default/locale
           update-locale LANG=zh_CN.UTF-8 LC_ALL=zh_CN.UTF-8
 
-          # 4. SSH配置允许root密码登录
+          # SSH配置：允许root密码登录，开机自启ssh服务
           sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config
           systemctl enable ssh
 
-          # 5. 清理缓存精简镜像体积
+          # 清理缓存压缩镜像体积
           apt clean
           rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
           INNER_SCRIPT
         working-directory: ${{ github.workspace }}
 
-      - name: Unmount bind mounts safely
+      - name: 安全卸载绑定挂载目录
         run: |
           sudo umount -l ./rootfs/sys
           sudo umount -l ./rootfs/proc
@@ -109,15 +109,17 @@ jobs:
           sudo umount -l ./rootfs/dev
         working-directory: ${{ github.workspace }}
 
-      - name: Pack rootfs to tar.xz
+      - name: 打包rootfs为xz压缩包
         run: |
-          sudo tar -cJf ubuntu2604-resolute-amd64-azure-fixed.tar.xz -C ./rootfs .
+          sudo tar -cJf ubuntu2604-resolute-amd64-native-rootfs.tar.xz -C ./rootfs .
         working-directory: ${{ github.workspace }}
 
-      - name: Upload build artifact
+      - name: 上传构建产物
         uses: actions/upload-artifact@v4
         with:
-          name: ubuntu2604-amd64-fixed-rootfs
-          path: ubuntu2604-resolute-amd64-azure-fixed.tar.xz
+          name: ubuntu2604-amd64-native-rootfs
+          path: ubuntu2604-resolute-amd64-native-rootfs.tar.xz
           retention-days: 30
+
+
 

@@ -1,3 +1,4 @@
+
 name: Build Ubuntu26.04 amd64 RootFS Native Coreutils Fix Auth
 run-name: Ubuntu26.04 amd64 原生coreutils 修复账号锁定su/sudo认证
 
@@ -21,12 +22,7 @@ jobs:
 
       - name: debootstrap 拉取 Ubuntu 26.04 resolute amd64（华为云源）
         run: |
-          sudo debootstrap \
-            --arch=amd64 \
-            --include=ca-certificates,openssh-server,locales,tzdata,sudo,vim,curl,wget,git,iproute2,net-tools,passwd,shadow-utils,libpam-modules,libpam-runtime,login \
-            resolute \
-            ./rootfs \
-            http://azure.archive.ubuntu.com/ubuntu
+          sudo debootstrap --arch=amd64 --include=ca-certificates,openssh-server,locales,tzdata,sudo,vim,curl,wget,git,iproute2,net-tools,passwd,shadow-utils,libpam-modules,libpam-runtime,login resolute ./rootfs http://azure.archive.ubuntu.com/ubuntu
         working-directory: ${{ github.workspace }}
 
       - name: 替换全局APT华为云源
@@ -52,28 +48,18 @@ jobs:
           sudo chroot ./rootfs /bin/bash -e <<'INNER_SCRIPT'
           apt update -y
 
-          # 优化APT配置，不安装多余推荐包，无coreutils相关操作
           echo 'APT::Install-Recommends "false";' > /etc/apt/apt.conf.d/99-no-recommends
           echo 'APT::AutoRemove::Recommends "false";' >> /etc/apt/apt.conf.d/99-no-recommends
 
-          # 重装账号认证整套核心组件
           apt install --reinstall -y sudo passwd shadow-utils libpam-modules libpam-runtime login --allow-remove-essential
 
-          ###########################
-          # 核心修复区块
-          # 解决：sudo: Account validation failure, is your account locked?
-          # 解决：su: Authentication failure
-          ###########################
-          # 设置root固定密码123456
+          # 设置root密码
           echo "root:123456" | chpasswd
-          # 解锁root用户
           passwd -u root
-          # 清空密码输错导致的登录锁定计数
           faillock --reset --user root || true
-          # 重新生成PAM认证配置
           pam-auth-update --force
 
-          # 修复关键文件权限
+          # 修正关键权限
           chmod 4755 /usr/bin/sudo
           chmod 4755 /bin/su
           chmod 600 /etc/shadow
@@ -81,21 +67,19 @@ jobs:
           chmod 640 /etc/group
           chown root:root /etc/shadow /etc/passwd /etc/group
 
-          # sudo权限放行root完整权限
           echo "root ALL=(ALL:ALL) ALL" >> /etc/sudoers
           visudo -c || true
 
-          # 中文完整本地化
+          # 中文本地化
           locale-gen zh_CN.UTF-8
           echo "LANG=zh_CN.UTF-8" > /etc/default/locale
           echo "LC_ALL=zh_CN.UTF-8" >> /etc/default/locale
           update-locale LANG=zh_CN.UTF-8 LC_ALL=zh_CN.UTF-8
 
-          # SSH配置：允许root密码登录，开机自启ssh服务
+          # SSH允许root密码登录
           sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config
           systemctl enable ssh
 
-          # 清理缓存压缩镜像体积
           apt clean
           rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
           INNER_SCRIPT

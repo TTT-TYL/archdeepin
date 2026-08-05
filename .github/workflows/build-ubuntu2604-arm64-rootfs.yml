@@ -1,4 +1,4 @@
-name: Build Ubuntu26.04 amd64 GNU coreutils Fix su auth
+name: Build Ubuntu26.04 amd64 Switch GNU coreutils + Fix Auth
 on:
   workflow_dispatch:
   push:
@@ -13,10 +13,10 @@ jobs:
           sudo apt update -y
           sudo apt install -y debootstrap qemu-user-static binfmt-support xz-utils
 
-      - name: 初始化目录
+      - name: 初始化工作目录
         run: mkdir -p ./rootfs
 
-      - name: debootstrap 拉取基础系统
+      - name: debootstrap初始化基础系统
         run: |
           sudo debootstrap --arch=amd64 --include=ca-certificates,openssh-server,locales,tzdata,sudo,vim,curl,wget,git,iproute2,net-tools,passwd,libpam-modules,libpam-runtime,login resolute ./rootfs http://azure.archive.ubuntu.com/ubuntu
 
@@ -36,31 +36,29 @@ jobs:
           sudo mount -t proc none ./rootfs/proc
           sudo mount -t sysfs none ./rootfs/sys
 
-      - name: Chroot内部配置
+      - name: Chroot配置：切换GNU coreutils、账号修复、全局sudo免密
         run: |
-          sudo chroot ./rootfs /bin/bash -e <<'INNER'
+          sudo chroot ./rootfs /bin/bash -e <<'INNER_SCRIPT'
           apt update -y
           echo 'APT::Install-Recommends "false";' > /etc/apt/apt.conf.d/99-no-recommends
           echo 'APT::AutoRemove::Recommends "false";' >> /etc/apt/apt.conf.d/99-no-recommends
 
-          # 彻底卸载uutils，安装正统GNU coreutils
-          apt remove -y uutils-coreutils
-          apt install -y coreutils
-          # 锁定禁止自动装回uutils
-          apt-mark hold coreutils
-          apt-mark mask uutils-coreutils
+          # 一键切换官方GNU coreutils（官方元包，自动切换链路）
+          apt install -y coreutils-from-gnu
+          # 锁定禁止切回rust版uutils
+          apt-mark hold coreutils-from-gnu
+          apt-mark mask coreutils-from-uutils rust-coreutils
 
-          # 重装认证基础组件
+          # 重装认证基础组件，无无效包
           apt install --reinstall -y sudo passwd libpam-modules libpam-runtime login
 
-          # 设置root密码、解锁账号、清空登录锁定
+          # root账号初始化：设密码、解锁、清空登录锁定
           echo "root:123456" | chpasswd
-          passwd -u root
           passwd --unlock root
           faillock --reset --user root || true
           pam-auth-update --force
 
-          # 固化关键权限（chroot打包解压必丢权限，强制写入）
+          # 固化关键SUID权限（chroot打包极易丢失权限）
           chmod 4755 /bin/su
           chmod 4755 /usr/bin/sudo
           chmod 600 /etc/shadow
@@ -68,40 +66,39 @@ jobs:
           chmod 640 /etc/group
           chown root:root /etc/shadow /etc/passwd /etc/group
 
-          # 最优解：放弃魔改pam.d/su，全局sudo免密，用 sudo -i 代替 su
-          echo "ALL ALL=(ALL:ALL) NOPASSWD: ALL" > /etc/sudoers.d/nopass-root
-          chmod 440 /etc/sudoers.d/nopass-root
+          # 最优方案：放弃su免密，全局所有用户sudo免密提权，用sudo -i进入root
+          echo "ALL ALL=(ALL:ALL) NOPASSWD: ALL" > /etc/sudoers.d/nopass_root
+          chmod 440 /etc/sudoers.d/nopass_root
           visudo -c || true
 
-          # 中文本地化
+          # 完整中文本地化
           locale-gen zh_CN.UTF-8
           echo "LANG=zh_CN.UTF-8" > /etc/default/locale
           echo "LC_ALL=zh_CN.UTF-8" >> /etc/default/locale
           update-locale LANG=zh_CN.UTF-8 LC_ALL=zh_CN.UTF-8
 
-          # SSH开启root密码登录
+          # SSH开启root密码登录并开机自启
           sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config
           systemctl enable ssh
 
+          # 清理缓存瘦身镜像
           apt clean
           rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
-          INNER
+          INNER_SCRIPT
 
-      - name: 安全卸载挂载
+      - name: 安全卸载挂载目录
         run: |
           sudo umount -l ./rootfs/sys
           sudo umount -l ./rootfs/proc
           sudo umount -l ./rootfs/dev/pts
           sudo umount -l ./rootfs/dev
 
-      - name: 打包压缩
-        run: sudo tar -cJf ubuntu2604-resolute-amd64-final.tar.xz -C ./rootfs .
+      - name: 打包rootfs压缩包
+        run: sudo tar -cJf ubuntu2604-resolute-amd64-gnu-fixed.tar.xz -C ./rootfs .
 
-      - name: 上传产物
+      - name: 上传构建产物
         uses: actions/upload-artifact@v4
         with:
-          name: ubuntu2604-amd64-gnu-coreutils-final
-          path: ubuntu2604-resolute-amd64-final.tar.xz
-
-
-
+          name: ubuntu2604-amd64-gnu-coreutils-rootfs
+          path: ubuntu2604-resolute-amd64-gnu-fixed.tar.xz
+          retention-days: 30

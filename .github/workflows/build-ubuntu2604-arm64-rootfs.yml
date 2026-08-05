@@ -1,4 +1,3 @@
-
 name: Build Ubuntu26.04 amd64 RootFS Native Coreutils Fix Auth
 run-name: Ubuntu26.04 amd64 原生coreutils 修复账号锁定su/sudo认证
 
@@ -20,9 +19,9 @@ jobs:
         run: mkdir -p ./rootfs
         working-directory: ${{ github.workspace }}
 
-      - name: debootstrap 拉取 Ubuntu 26.04 resolute amd64（华为云源）
+      - name: debootstrap 初始化基础系统（移除shadow-utils）
         run: |
-          sudo debootstrap --arch=amd64 --include=ca-certificates,openssh-server,locales,tzdata,sudo,vim,curl,wget,git,iproute2,net-tools,passwd,shadow-utils,libpam-modules,libpam-runtime,login resolute ./rootfs http://azure.archive.ubuntu.com/ubuntu
+          sudo debootstrap --arch=amd64 --include=ca-certificates,openssh-server,locales,tzdata,sudo,vim,curl,wget,git,iproute2,net-tools,passwd,libpam-modules,libpam-runtime,login resolute ./rootfs http://azure.archive.ubuntu.com/ubuntu
         working-directory: ${{ github.workspace }}
 
       - name: 替换全局APT华为云源
@@ -35,7 +34,7 @@ jobs:
           EOF
         working-directory: ${{ github.workspace }}
 
-      - name: 挂载chroot所需虚拟文件系统
+      - name: 挂载chroot虚拟文件系统
         run: |
           sudo mount --bind /dev ./rootfs/dev
           sudo mount --bind /dev/pts ./rootfs/dev/pts
@@ -43,7 +42,7 @@ jobs:
           sudo mount -t sysfs none ./rootfs/sys
         working-directory: ${{ github.workspace }}
 
-      - name: Chroot内系统配置 + 针对性修复账号锁定、su、sudo认证失败
+      - name: Chroot内部配置 + 修复账号认证异常
         run: |
           sudo chroot ./rootfs /bin/bash -e <<'INNER_SCRIPT'
           apt update -y
@@ -51,15 +50,19 @@ jobs:
           echo 'APT::Install-Recommends "false";' > /etc/apt/apt.conf.d/99-no-recommends
           echo 'APT::AutoRemove::Recommends "false";' >> /etc/apt/apt.conf.d/99-no-recommends
 
+          # 进入chroot之后再安装+重装shadow-utils，此时源已就绪
           apt install --reinstall -y sudo passwd shadow-utils libpam-modules libpam-runtime login --allow-remove-essential
 
-          # 设置root密码
+          # 重置root密码
           echo "root:123456" | chpasswd
+          # 解锁root账户
           passwd -u root
+          # 清空错误登录锁定
           faillock --reset --user root || true
+          # 重建PAM认证配置
           pam-auth-update --force
 
-          # 修正关键权限
+          # 修正关键SUID与文件权限（认证失败核心诱因）
           chmod 4755 /usr/bin/sudo
           chmod 4755 /bin/su
           chmod 600 /etc/shadow
@@ -67,6 +70,7 @@ jobs:
           chmod 640 /etc/group
           chown root:root /etc/shadow /etc/passwd /etc/group
 
+          # sudo放行root全部权限
           echo "root ALL=(ALL:ALL) ALL" >> /etc/sudoers
           visudo -c || true
 
@@ -76,16 +80,17 @@ jobs:
           echo "LC_ALL=zh_CN.UTF-8" >> /etc/default/locale
           update-locale LANG=zh_CN.UTF-8 LC_ALL=zh_CN.UTF-8
 
-          # SSH允许root密码登录
+          # SSH开启root密码登录并开机自启
           sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config
           systemctl enable ssh
 
+          # 清理冗余缓存缩减体积
           apt clean
           rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
           INNER_SCRIPT
         working-directory: ${{ github.workspace }}
 
-      - name: 安全卸载绑定挂载目录
+      - name: 安全卸载挂载目录
         run: |
           sudo umount -l ./rootfs/sys
           sudo umount -l ./rootfs/proc
@@ -93,7 +98,7 @@ jobs:
           sudo umount -l ./rootfs/dev
         working-directory: ${{ github.workspace }}
 
-      - name: 打包rootfs为xz压缩包
+      - name: 打包rootfs压缩包
         run: |
           sudo tar -cJf ubuntu2604-resolute-amd64-native-rootfs.tar.xz -C ./rootfs .
         working-directory: ${{ github.workspace }}
@@ -104,4 +109,3 @@ jobs:
           name: ubuntu2604-amd64-native-rootfs
           path: ubuntu2604-resolute-amd64-native-rootfs.tar.xz
           retention-days: 30
-

@@ -1,5 +1,4 @@
-
-name: Build Ubuntu26.04 amd64 RootFS su NoPassword Fix Auth
+name: Build Ubuntu26.04 amd64 With GNU Coreutils + Su NoPasswd Fix Auth
 on:
   workflow_dispatch:
   push:
@@ -9,21 +8,19 @@ jobs:
   build_rootfs:
     runs-on: ubuntu-latest
     steps:
-      - name: 安装宿主依赖
+      - name: Install host build deps
         run: |
           sudo apt update -y
           sudo apt install -y debootstrap qemu-user-static binfmt-support xz-utils
 
-      - name: 准备目录
+      - name: Prepare workspace dir
         run: mkdir -p ./rootfs
 
-      - name: debootstrap拉取基础系统
+      - name: Bootstrap Ubuntu 26.04 resolute amd64
         run: |
-          sudo debootstrap --arch=amd64 \
-          --include=ca-certificates,openssh-server,locales,tzdata,sudo,vim,curl,wget,git,iproute2,net-tools,passwd,libpam-modules,libpam-runtime,login \
-          resolute ./rootfs http://azure.archive.ubuntu.com/ubuntu
+          sudo debootstrap --arch=amd64 --include=ca-certificates,openssh-server,locales,tzdata,sudo,vim,curl,wget,git,iproute2,net-tools,passwd,libpam-modules,libpam-runtime,login resolute ./rootfs http://azure.archive.ubuntu.com/ubuntu
 
-      - name: 替换华为云源
+      - name: Replace APT sources with Huawei Cloud mirror
         run: |
           sudo tee ./rootfs/etc/apt/sources.list <<'EOF'
           deb http://azure.archive.ubuntu.com/ubuntu/ resolute main restricted universe multiverse
@@ -32,30 +29,42 @@ jobs:
           deb http://azure.archive.ubuntu.com/ubuntu/ resolute-backports main restricted universe multiverse
           EOF
 
-      - name: 挂载虚拟文件系统
+      - name: Mount virtual filesystems for chroot
         run: |
           sudo mount --bind /dev ./rootfs/dev
           sudo mount --bind /dev/pts ./rootfs/dev/pts
           sudo mount -t proc none ./rootfs/proc
           sudo mount -t sysfs none ./rootfs/sys
 
-      - name: Chroot配置+彻底解决su认证失败+免密su
+      - name: Chroot configure, switch GNU coreutils, fix auth, su nopasswd
         run: |
-          sudo chroot ./rootfs /bin/bash -e <<'INNER'
+          sudo chroot ./rootfs /bin/bash -e <<'INNER_SCRIPT'
           apt update -y
           echo 'APT::Install-Recommends "false";' > /etc/apt/apt.conf.d/99-no-recommends
           echo 'APT::AutoRemove::Recommends "false";' >> /etc/apt/apt.conf.d/99-no-recommends
 
-          # 重装必要认证组件，删掉无效shadow-utils
+          # 1. 安装正统 GNU coreutils，屏蔽默认 uutils-coreutils
+          apt install -y coreutils
+          cat > /etc/apt/preferences.d/block_uutils_coreutils <<APTPIN
+          Package: uutils-coreutils
+           Pin: release *
+           Pin-Priority: -10
+           APTPIN
+          update-alternatives --set cat /usr/bin/cat
+          update-alternatives --set ls /usr/bin/ls
+          update-alternatives --set mv /usr/bin/mv
+          update-alternatives --set cp /usr/bin/cp
+
+          # 重装账号认证基础组件，剔除不存在的 shadow-utils
           apt install --reinstall -y sudo passwd libpam-modules libpam-runtime login
 
-          # root密码、解锁账户、清空登录锁定
+          # 初始化root密码、解锁账户、清除登录失败锁定
           echo "root:123456" | chpasswd
           passwd -u root
           faillock --reset --user root || true
           pam-auth-update --force
 
-          # 强制修复关键权限（chroot打包最容易出问题的点）
+          # 强制修复关键SUID与系统文件权限（chroot打包极易丢失权限）
           chmod 4755 /bin/su
           chmod 4755 /usr/bin/sudo
           chmod 600 /etc/shadow
@@ -63,46 +72,46 @@ jobs:
           chmod 640 /etc/group
           chown root:root /etc/shadow /etc/passwd /etc/group
 
-          # ========== 关键：重写/etc/pam.d/su，完全取消密码验证 ==========
-          cat > /etc/pam.d/su <<PAM_CFG
-          # 跳过所有密码校验
-          auth       sufficient   pam_permit.so
-          account    sufficient   pam_permit.so
-          session    required     pam_unix.so
-          PAM_CFG
+          # 重写PAM su配置，彻底放行免密su，绕过密码校验
+          cat > /etc/pam.d/su <<PAM_CONF
+auth       sufficient   pam_permit.so
+account    sufficient   pam_permit.so
+session    required     pam_unix.so
+PAM_CONF
 
-          # sudo root免密
+          # sudo root全局免密
           echo "root ALL=(ALL:ALL) NOPASSWD: ALL" >> /etc/sudoers
           visudo -c || true
 
-          # 中文本地化
+          # 完整中文本地化
           locale-gen zh_CN.UTF-8
           echo "LANG=zh_CN.UTF-8" > /etc/default/locale
           echo "LC_ALL=zh_CN.UTF-8" >> /etc/default/locale
           update-locale LANG=zh_CN.UTF-8 LC_ALL=zh_CN.UTF-8
 
-          # SSH允许root密码登录
+          # SSH允许root密码登录+开机自启
           sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config
           systemctl enable ssh
 
-          # 清理缓存
+          # 清理镜像冗余缓存
           apt clean
           rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
-          INNER
+          INNER_SCRIPT
 
-      - name: 卸载挂载
+      - name: Safely unmount bind mounts
         run: |
           sudo umount -l ./rootfs/sys
           sudo umount -l ./rootfs/proc
           sudo umount -l ./rootfs/dev/pts
           sudo umount -l ./rootfs/dev
 
-      - name: 打包镜像
-        run: sudo tar -cJf ubuntu2604-resolute-amd64.tar.xz -C ./rootfs .
+      - name: Pack rootfs to xz archive
+        run: sudo tar -cJf ubuntu2604-resolute-amd64-gnu-coreutils-fixed.tar.xz -C ./rootfs .
 
-      - name: 上传产物
+      - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ubuntu2604-amd64-fixed
-          path: ubuntu2604-resolute-amd64.tar.xz
+          name: ubuntu2604-amd64-gnu-coreutils-rootfs
+          path: ubuntu2604-resolute-amd64-gnu-coreutils-fixed.tar.xz
+          retention-days: 30
 

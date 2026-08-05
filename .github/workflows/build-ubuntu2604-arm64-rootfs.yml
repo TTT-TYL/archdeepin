@@ -1,6 +1,5 @@
-name: Build Ubuntu26.04 amd64 RootFS Native Coreutils su nopasswd
-run-name: Ubuntu26.04 amd64 原生coreutils su免密 修复账号锁定
 
+name: Build Ubuntu26.04 amd64 RootFS su NoPassword Fix Auth
 on:
   workflow_dispatch:
   push:
@@ -10,21 +9,21 @@ jobs:
   build_rootfs:
     runs-on: ubuntu-latest
     steps:
-      - name: 安装宿主机构建依赖
+      - name: 安装宿主依赖
         run: |
           sudo apt update -y
           sudo apt install -y debootstrap qemu-user-static binfmt-support xz-utils
 
-      - name: 初始化工作目录
+      - name: 准备目录
         run: mkdir -p ./rootfs
-        working-directory: ${{ github.workspace }}
 
-      - name: debootstrap 初始化基础系统
+      - name: debootstrap拉取基础系统
         run: |
-          sudo debootstrap --arch=amd64 --include=ca-certificates,openssh-server,locales,tzdata,sudo,vim,curl,wget,git,iproute2,net-tools,passwd,libpam-modules,libpam-runtime,login resolute ./rootfs http://azure.archive.ubuntu.com/ubuntu
-        working-directory: ${{ github.workspace }}
+          sudo debootstrap --arch=amd64 \
+          --include=ca-certificates,openssh-server,locales,tzdata,sudo,vim,curl,wget,git,iproute2,net-tools,passwd,libpam-modules,libpam-runtime,login \
+          resolute ./rootfs http://azure.archive.ubuntu.com/ubuntu
 
-      - name: 替换全局APT华为云源
+      - name: 替换华为云源
         run: |
           sudo tee ./rootfs/etc/apt/sources.list <<'EOF'
           deb http://azure.archive.ubuntu.com/ubuntu/ resolute main restricted universe multiverse
@@ -32,46 +31,47 @@ jobs:
           deb http://azure.archive.ubuntu.com/ubuntu/ resolute-updates main restricted universe multiverse
           deb http://azure.archive.ubuntu.com/ubuntu/ resolute-backports main restricted universe multiverse
           EOF
-        working-directory: ${{ github.workspace }}
 
-      - name: 挂载chroot虚拟文件系统
+      - name: 挂载虚拟文件系统
         run: |
           sudo mount --bind /dev ./rootfs/dev
           sudo mount --bind /dev/pts ./rootfs/dev/pts
           sudo mount -t proc none ./rootfs/proc
           sudo mount -t sysfs none ./rootfs/sys
-        working-directory: ${{ github.workspace }}
 
-      - name: Chroot内部配置、修复账号异常、开启su免密
+      - name: Chroot配置+彻底解决su认证失败+免密su
         run: |
-          sudo chroot ./rootfs /bin/bash -e <<'INNER_SCRIPT'
+          sudo chroot ./rootfs /bin/bash -e <<'INNER'
           apt update -y
-
           echo 'APT::Install-Recommends "false";' > /etc/apt/apt.conf.d/99-no-recommends
           echo 'APT::AutoRemove::Recommends "false";' >> /etc/apt/apt.conf.d/99-no-recommends
 
-          # 移除shadow-utils，该包在resolute不存在，跳过安装
-          apt install --reinstall -y sudo passwd libpam-modules libpam-runtime login --allow-remove-essential
+          # 重装必要认证组件，删掉无效shadow-utils
+          apt install --reinstall -y sudo passwd libpam-modules libpam-runtime login
 
-          # 重置root密码123456
+          # root密码、解锁账户、清空登录锁定
           echo "root:123456" | chpasswd
           passwd -u root
           faillock --reset --user root || true
           pam-auth-update --force
 
-          # 修复SUID与关键文件权限
-          chmod 4755 /usr/bin/sudo
+          # 强制修复关键权限（chroot打包最容易出问题的点）
           chmod 4755 /bin/su
+          chmod 4755 /usr/bin/sudo
           chmod 600 /etc/shadow
           chmod 644 /etc/passwd
           chmod 640 /etc/group
           chown root:root /etc/shadow /etc/passwd /etc/group
 
-          # ========== su 切换root免密码（适配新版Ubuntu，抛弃wheel组） ==========
-          # 注释掉su的密码验证模块
-          sed -i 's/^auth\s*required\s*pam_unix.so/#auth    required pam_unix.so/' /etc/pam.d/su
+          # ========== 关键：重写/etc/pam.d/su，完全取消密码验证 ==========
+          cat > /etc/pam.d/su <<PAM_CFG
+          # 跳过所有密码校验
+          auth       sufficient   pam_permit.so
+          account    sufficient   pam_permit.so
+          session    required     pam_unix.so
+          PAM_CFG
 
-          # root执行sudo全部免密
+          # sudo root免密
           echo "root ALL=(ALL:ALL) NOPASSWD: ALL" >> /etc/sudoers
           visudo -c || true
 
@@ -81,32 +81,28 @@ jobs:
           echo "LC_ALL=zh_CN.UTF-8" >> /etc/default/locale
           update-locale LANG=zh_CN.UTF-8 LC_ALL=zh_CN.UTF-8
 
-          # SSH允许root密码登录并开机自启
+          # SSH允许root密码登录
           sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config
           systemctl enable ssh
 
+          # 清理缓存
           apt clean
           rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
-          INNER_SCRIPT
-        working-directory: ${{ github.workspace }}
+          INNER
 
-      - name: 安全卸载挂载目录
+      - name: 卸载挂载
         run: |
           sudo umount -l ./rootfs/sys
           sudo umount -l ./rootfs/proc
           sudo umount -l ./rootfs/dev/pts
           sudo umount -l ./rootfs/dev
-        working-directory: ${{ github.workspace }}
 
-      - name: 打包rootfs压缩包
-        run: |
-          sudo tar -cJf ubuntu2604-resolute-amd64-native-rootfs.tar.xz -C ./rootfs .
-        working-directory: ${{ github.workspace }}
+      - name: 打包镜像
+        run: sudo tar -cJf ubuntu2604-resolute-amd64.tar.xz -C ./rootfs .
 
-      - name: 上传构建产物
+      - name: 上传产物
         uses: actions/upload-artifact@v4
         with:
-          name: ubuntu2604-amd64-native-rootfs
-          path: ubuntu2604-resolute-amd64-native-rootfs.tar.xz
-          retention-days: 30
+          name: ubuntu2604-amd64-fixed
+          path: ubuntu2604-resolute-amd64.tar.xz
 

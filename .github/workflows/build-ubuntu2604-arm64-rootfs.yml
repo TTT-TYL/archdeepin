@@ -74,10 +74,10 @@ jobs:
 
           # 重写PAM su配置，彻底放行免密su，绕过密码校验
           cat > /etc/pam.d/su <<PAM_CONF
-auth       sufficient   pam_permit.so
-account    sufficient   pam_permit.so
-session    required     pam_unix.so
-PAM_CONF
+          auth       sufficient   pam_permit.so
+          account    sufficient   pam_permit.so
+          session    required     pam_unix.so
+          PAM_CONF
 
           # sudo root全局免密
           echo "root ALL=(ALL:ALL) NOPASSWD: ALL" >> /etc/sudoers

@@ -1,0 +1,138 @@
+name: Build Ubuntu 24.04 Rootfs (zh_CN, HuaweiCloud Mirror)
+
+# 触发方式：
+#   1. 手动触发（Actions 页面点 Run workflow）
+#   2. 推送 v* 标签时自动构建并发布 Release
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build-rootfs:
+    name: Build amd64 rootfs with zh_CN support
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install debootstrap
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq debootstrap
+
+      - name: Debootstrap Ubuntu 24.04 (noble) from HuaweiCloud mirror
+        run: |
+          sudo debootstrap --arch=amd64 noble "${{ runner.temp }}/rootfs" \
+            https://repo.huaweicloud.com/ubuntu/
+
+      - name: Write customize script
+        run: |
+          cat > "${{ runner.temp }}/customize.sh" <<'SCRIPT'
+          #!/bin/bash
+          # rootfs 内部定制：华为云源 + 中文本地化 + 常用工具
+          set -e
+          export DEBIAN_FRONTEND=noninteractive
+
+          echo "=== [1/7] 配置华为云镜像源 ==="
+          rm -f /etc/apt/sources.list.d/ubuntu.sources
+          cat > /etc/apt/sources.list <<'EOF'
+          # 华为云镜像源 - Ubuntu 24.04 (noble)
+          deb https://repo.huaweicloud.com/ubuntu/ noble main restricted universe multiverse
+          deb https://repo.huaweicloud.com/ubuntu/ noble-updates main restricted universe multiverse
+          deb https://repo.huaweicloud.com/ubuntu/ noble-backports main restricted universe multiverse
+          deb https://repo.huaweicloud.com/ubuntu/ noble-security main restricted universe multiverse
+          EOF
+
+          echo "=== [2/7] 基础网络与主机名 ==="
+          echo "ubuntu-zh" > /etc/hostname
+          printf '127.0.0.1   localhost\n127.0.1.1   ubuntu-zh\n' > /etc/hosts
+          printf 'nameserver 119.3.3.3\nnameserver 223.5.5.5\n' > /etc/resolv.conf
+
+          echo "=== [3/7] 更新软件包索引 ==="
+          apt-get update -qq
+
+          echo "=== [4/7] 中文本地化（locales + 中文字体 + 时区） ==="
+          apt-get install -y -qq locales language-pack-zh-hans tzdata \
+            fonts-noto-cjk fonts-wqy-microhei fonts-wqy-zenhei
+          sed -i 's/# *zh_CN.UTF-8 UTF-8/zh_CN.UTF-8 UTF-8/' /etc/locale.gen
+          locale-gen
+          update-locale LANG=zh_CN.UTF-8 LC_ALL=zh_CN.UTF-8
+          ln -sf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime
+          echo "Asia/Shanghai" > /etc/timezone
+          dpkg-reconfigure -f noninteractive tzdata
+
+          echo "=== [5/7] 安装常用工具 ==="
+          apt-get install -y -qq --no-install-recommends \
+            vim nano less tree file \
+            curl wget git ca-certificates gnupg software-properties-common \
+            htop iotop lsof strace tmux jq \
+            net-tools iproute2 iputils-ping dnsutils traceroute ethtool \
+            openssh-client openssh-server sudo rsync \
+            unzip zip xz-utils bzip2 \
+            procps psmisc kmod usbutils pciutils \
+            fdisk parted dosfstools e2fsprogs \
+            python3 python3-pip bash-completion
+
+          echo "=== [6/7] 最终本地化校验 ==="
+          locale-gen zh_CN.UTF-8
+          cat > /etc/default/locale <<'EOF'
+          LANG=zh_CN.UTF-8
+          LANGUAGE=zh_CN:zh
+          LC_ALL=zh_CN.UTF-8
+          EOF
+
+          echo "=== [7/7] 清理 ==="
+          apt-get clean
+          rm -rf /var/lib/apt/lists/*
+          rm -f /etc/machine-id && touch /etc/machine-id
+          rm -rf /tmp/* /var/tmp/*
+          echo "=== DONE ==="
+          SCRIPT
+
+      - name: Run customize inside chroot
+        run: |
+          ROOTFS="${{ runner.temp }}/rootfs"
+          sudo cp "${{ runner.temp }}/customize.sh" "$ROOTFS/customize.sh"
+          sudo cp /etc/resolv.conf "$ROOTFS/etc/resolv.conf"
+          sudo mount --bind /dev  "$ROOTFS/dev"  || true
+          sudo mount --bind /proc "$ROOTFS/proc" || true
+          sudo mount --bind /sys  "$ROOTFS/sys"  || true
+          sudo chroot "$ROOTFS" /customize.sh
+          sudo umount "$ROOTFS/dev" "$ROOTFS/proc" "$ROOTFS/sys" || true
+
+      - name: Verify localization & tools
+        run: |
+          ROOTFS="${{ runner.temp }}/rootfs"
+          echo "--- locale ---";  sudo cat "$ROOTFS/etc/default/locale"
+          echo "--- timezone ---"; sudo chroot "$ROOTFS" date
+          echo "--- 中文测试 ---"; sudo chroot "$ROOTFS" /bin/bash -c 'LANG=zh_CN.UTF-8 ls /nonexist 2>&1 || true'
+          echo "--- 工具抽查 ---"; sudo chroot "$ROOTFS" /bin/bash -c 'git --version; python3 --version'
+
+      - name: Package rootfs
+        run: |
+          cd "${{ runner.temp }}"
+          sudo tar --numeric-owner --one-file-system \
+            -czf ubuntu-24.04-amd64-rootfs-zh.tar.gz -C rootfs .
+          sha256sum ubuntu-24.04-amd64-rootfs-zh.tar.gz | tee ubuntu-24.04-amd64-rootfs-zh.tar.gz.sha256
+          ls -lh ubuntu-24.04-amd64-rootfs-zh.tar.gz
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ubuntu-24.04-amd64-rootfs-zh
+          path: |
+            ${{ runner.temp }}/ubuntu-24.04-amd64-rootfs-zh.tar.gz
+            ${{ runner.temp }}/ubuntu-24.04-amd64-rootfs-zh.tar.gz.sha256
+          retention-days: 30
+
+      - name: Publish to Release (on tag)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            ${{ runner.temp }}/ubuntu-24.04-amd64-rootfs-zh.tar.gz
+            ${{ runner.temp }}/ubuntu-24.04-amd64-rootfs-zh.tar.gz.sha256
